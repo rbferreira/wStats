@@ -317,6 +317,17 @@ void Shutdown(Slot& f)
     Teardown(f);
 }
 
+/// Whether the element fell out of the frame's live tree. Explorer can rebuild a frame's
+/// content without removing the frame (turning the Widgets button off does), and the
+/// element then sits in a detached tree that is never drawn. A few calls per tick.
+bool Detached(Slot& f)
+{
+    auto frame = f.frame.get();
+    if (!frame) return true;
+    return VisualTreeHelper::GetParent(f.host) != f.root || FindChild<Panel>(frame, L"RootGrid") != f.root ||
+           FindChild<Panel>(f.root, L"TaskbarFrameRepeater") != f.repeater;
+}
+
 /// Finds the frame's parts and inserts the element. False until the frame's template has
 /// been applied (its children are created after the frame itself appears).
 bool Setup(Slot& f)
@@ -496,6 +507,12 @@ void Tick(Slot& f)
     InterlockedIncrement(&g_shared.header->heartbeat);
     g_shared.header->tapPid = GetCurrentProcessId();
 
+    if (f.host && OnTarget(f) && Detached(f))
+    {
+        wstats::Trace(L"core: frame %llu was rebuilt by Explorer; inserting again", static_cast<unsigned long long>(f.handle));
+        Teardown(f);
+    }
+
     if (!OnTarget(f))
     {
         if (f.host) Teardown(f);
@@ -568,6 +585,9 @@ extern "C" void __stdcall WStatsCoreTreeChange(ParentChildRelation, VisualElemen
             std::lock_guard lock(g_lock);
             if (type == Add)
             {
+                // A retried advise replays the tree again.
+                for (auto& s : g_sources)
+                    if (s.handle == el.Handle) return;
                 com_ptr<::IInspectable> obj;
                 if (FAILED(g_diag->GetIInspectableFromHandle(el.Handle, reinterpret_cast<::IInspectable**>(obj.put())))) return;
                 Source s;

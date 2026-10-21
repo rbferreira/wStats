@@ -4,6 +4,7 @@
 //! buttons, so we ask it (~20 ms, every second).
 
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -37,50 +38,61 @@ pub struct Scan {
 
 /// Scans on its own thread. UI Automation sends messages to the taskbar's child windows,
 /// the strip window among them, so scanning from the thread that owns that window
-/// deadlocks: it would be waiting on itself.
+/// deadlocks: it would be waiting on itself. One thread scans every taskbar in turn:
+/// with one thread per taskbar, some of them never got a scan back.
 pub struct Scanner {
-    /// Taskbar to scan (as an integer: HWND is not `Send`) and its rectangle.
-    target: Arc<Mutex<(isize, RECT)>>,
-    latest: Arc<Mutex<Option<Scan>>>,
+    /// Taskbars to scan (as integers: HWND is not `Send`) and their rectangles.
+    targets: Arc<Mutex<Vec<(isize, RECT)>>>,
+    latest: Arc<Mutex<HashMap<isize, Scan>>>,
 }
 
 impl Scanner {
     pub fn new() -> Self {
-        let target = Arc::new(Mutex::new((0, RECT::default())));
-        let latest = Arc::new(Mutex::new(None));
-        let (weak_target, weak_latest) = (Arc::downgrade(&target), Arc::downgrade(&latest));
-        let _ = std::thread::Builder::new().name("uia".into()).spawn(move || worker(weak_target, weak_latest));
-        Self { target, latest }
+        let targets = Arc::new(Mutex::new(Vec::new()));
+        let latest = Arc::new(Mutex::new(HashMap::new()));
+        let (weak_targets, weak_latest) = (Arc::downgrade(&targets), Arc::downgrade(&latest));
+        let _ = std::thread::Builder::new().name("uia".into()).spawn(move || worker(weak_targets, weak_latest));
+        Self { targets, latest }
     }
 
     /// The most recent scan of `taskbar`, or `None` until the first one is in. Never
-    /// blocks; asking for another taskbar redirects the next scans to it.
+    /// blocks; asking for a new taskbar adds it to the next scans.
     pub fn scan(&self, taskbar: HWND, taskbar_rect: RECT) -> Option<Scan> {
         let key = taskbar.0 as isize;
-        let mut target = self.target.lock();
-        if target.0 != key {
-            *self.latest.lock() = None;
+        let mut targets = self.targets.lock();
+        match targets.iter_mut().find(|t| t.0 == key) {
+            Some(t) => t.1 = taskbar_rect,
+            None => targets.push((key, taskbar_rect)),
         }
-        *target = (key, taskbar_rect);
-        drop(target);
-        self.latest.lock().clone()
+        drop(targets);
+        self.latest.lock().get(&key).cloned()
+    }
+
+    /// Stops scanning the taskbars not in `keep`.
+    pub fn retain(&self, keep: &[HWND]) {
+        let keep: Vec<isize> = keep.iter().map(|h| h.0 as isize).collect();
+        self.targets.lock().retain(|t| keep.contains(&t.0));
+        self.latest.lock().retain(|k, _| keep.contains(k));
     }
 }
 
 /// Scans every second until the [`Scanner`] is dropped.
-fn worker(target: Weak<Mutex<(isize, RECT)>>, latest: Weak<Mutex<Option<Scan>>>) {
+fn worker(targets: Weak<Mutex<Vec<(isize, RECT)>>>, latest: Weak<Mutex<HashMap<isize, Scan>>>) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
     let Ok(uia) = Uia::new() else { return };
     loop {
-        let Some((hwnd, rect)) = target.upgrade().map(|t| *t.lock()) else { return };
-        if hwnd != 0 {
+        let Some(list) = targets.upgrade().map(|t| t.lock().clone()) else { return };
+        for (hwnd, rect) in list {
             let scan = uia.scan(HWND(hwnd as _), rect);
             let Some(latest) = latest.upgrade() else { return };
-            // Skip the result if the target changed while scanning.
-            if target.upgrade().is_some_and(|t| t.lock().0 == hwnd) {
-                *latest.lock() = scan;
+            // Skip the result if the taskbar was dropped while scanning.
+            if targets.upgrade().is_some_and(|t| t.lock().iter().any(|t| t.0 == hwnd)) {
+                match scan {
+                    Some(scan) => latest.lock().insert(hwnd, scan),
+                    None => latest.lock().remove(&hwnd),
+                };
             }
         }
         std::thread::sleep(Duration::from_secs(1));
