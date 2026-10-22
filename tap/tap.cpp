@@ -12,6 +12,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.UI.Core.h>
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <utility>
@@ -119,18 +120,37 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
     }
 
     // Background thread: subscribe to the tree, then serve reload requests forever.
+    // Advising also replays the whole tree, so the core sees every taskbar. Explorer can
+    // refuse it (E_UNEXPECTED, seen after the Widgets button was turned off); a refusal is
+    // retried with a growing delay, reloads still being served meanwhile.
     void Serve()
     {
         auto tree = m_diag.as<IVisualTreeService3>();
+        HANDLE reload = CreateEventW(nullptr, FALSE, FALSE, wstats::kReloadEvent);
         LoadCore();
         HRESULT hr = tree->AdviseVisualTreeChange(this);
         wstats::Trace(L"stub: serving (advise 0x%08X)", static_cast<unsigned>(hr));
+        bool advised = SUCCEEDED(hr);
+        DWORD retry = 1000;
 
-        HANDLE reload = CreateEventW(nullptr, FALSE, FALSE, wstats::kReloadEvent);
-        while (reload && WaitForSingleObject(reload, INFINITE) == WAIT_OBJECT_0)
+        while (reload)
         {
+            DWORD wait = WaitForSingleObject(reload, advised ? INFINITE : retry);
+            if (wait == WAIT_TIMEOUT)
+            {
+                hr = tree->AdviseVisualTreeChange(this);
+                advised = SUCCEEDED(hr);
+                wstats::Trace(L"stub: advise retried after %lu ms: 0x%08X", retry, static_cast<unsigned>(hr));
+                retry = std::min<DWORD>(retry * 2, 60000);
+                continue;
+            }
+            if (wait != WAIT_OBJECT_0) break;
             wstats::Trace(L"stub: reload requested");
-            tree->UnadviseVisualTreeChange(this);
+            if (advised)
+            {
+                hr = tree->UnadviseVisualTreeChange(this);
+                if (FAILED(hr)) wstats::Trace(L"stub: unadvise failed 0x%08X", static_cast<unsigned>(hr));
+            }
             OnUiThread([this] {
                 AcquireSRWLockExclusive(&m_lock);
                 Core old = std::exchange(m_core, Core{});
@@ -142,9 +162,10 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
                 }
             });
             LoadCore();
-            // Advising again replays the whole tree, so the new core sees the taskbar.
             hr = tree->AdviseVisualTreeChange(this);
-            if (FAILED(hr)) wstats::Trace(L"stub: advise after reload failed 0x%08X", static_cast<unsigned>(hr));
+            advised = SUCCEEDED(hr);
+            retry = 1000;
+            if (!advised) wstats::Trace(L"stub: advise after reload failed 0x%08X", static_cast<unsigned>(hr));
         }
     }
 
