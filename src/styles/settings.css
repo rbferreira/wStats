@@ -528,20 +528,12 @@ body.settings {
   justify-content: center;
 }
 
+/* The app icon brings its own tile; only a shadow is added. */
 .about-mark {
-  display: grid;
-  place-items: center;
-  width: 96px;
-  height: 96px;
-  border-radius: 24px;
-  color: #fff;
-  background: linear-gradient(145deg, var(--blue), color-mix(in srgb, var(--blue) 55%, #000));
-  box-shadow: 0 16px 40px color-mix(in srgb, var(--blue) 45%, transparent);
-}
-
-.about-mark .icon {
-  width: 54px;
-  height: 54px;
+  display: block;
+  width: 112px;
+  height: 112px;
+  filter: drop-shadow(0 14px 30px rgb(0 0 0 / 0.35));
 }
 
 .about-name {
