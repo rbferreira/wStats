@@ -11,6 +11,8 @@ import type { Module } from "./modules/common";
 import { applySettings } from "./theme";
 import type { ModuleId, MonitorInfo, Settings, UpdateStatus } from "./types";
 import { h, setText } from "./ui";
+// The app's own icon, the one the taskbar and the installer show.
+import appIcon from "../src-tauri/icons/128x128@2x.png";
 
 const ALL: ModuleId[] = ["cpu", "mem", "disk", "net", "gpu", "npu", "battery", "temp", "fans", "power"];
 
@@ -606,7 +608,7 @@ function aboutPage() {
     h(
       "div",
       "stage-body center about",
-      h("div", "about-mark", icon("cpu")),
+      Object.assign(h("img", "about-mark"), { src: appIcon, alt: "" }),
       h("h2", "about-name", "wStats"),
       h("p", "about-tag", t.set.tagline),
       updateStatus ? h("p", "about-version", t.set.version(updateStatus.current)) : "",
