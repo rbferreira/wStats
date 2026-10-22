@@ -6,6 +6,7 @@ mod sensor_service;
 mod shell;
 mod stats;
 mod strip;
+mod update;
 mod win;
 
 use config::Settings;
@@ -21,6 +22,7 @@ use tauri::utils::config::WindowEffectsConfig;
 use tauri::window::Effect;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_notification::NotificationExt;
 
 pub struct App {
     store: Store,
@@ -29,6 +31,7 @@ pub struct App {
     popup: Arc<Popup>,
     settings: RwLock<Settings>,
     settings_path: PathBuf,
+    updater: Arc<update::Updater>,
 }
 
 #[tauri::command]
@@ -106,6 +109,58 @@ fn set_autostart(handle: AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn update_status(app: tauri::State<'_, Arc<App>>) -> update::Status {
+    app.updater.status()
+}
+
+#[tauri::command]
+fn check_update(app: tauri::State<'_, Arc<App>>) {
+    app.updater.check_now();
+}
+
+#[tauri::command]
+fn open_release_notes(app: tauri::State<'_, Arc<App>>) {
+    app.updater.open_notes();
+}
+
+#[tauri::command]
+fn download_update(app: tauri::State<'_, Arc<App>>) {
+    app.updater.download();
+}
+
+/// Opens the new release's setup download in the browser.
+fn start_update(handle: &AppHandle) {
+    if let Some(app) = handle.try_state::<Arc<App>>() {
+        app.updater.download();
+    }
+}
+
+/// The update status changed: tell Settings, offer it in the menus, and announce a new
+/// release once.
+fn update_changed(handle: &AppHandle, st: &update::Status) {
+    let _ = handle.emit("update", st);
+    if let (Some(tray), Ok(menu)) = (handle.tray_by_id("main"), tray_menu(handle)) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    let (Some(version), Some(app)) = (&st.latest, handle.try_state::<Arc<App>>()) else { return };
+    if app.settings.read().update_notified.as_ref() == Some(version) {
+        return;
+    }
+    let body = format!("{} {version}. {}", lang::tr("Nova versão do wStats:", "New wStats version:"), lang::tr("Baixe pelo menu ou em Configurações › Sobre.", "Download it from the menu or in Settings › About."));
+    if let Err(e) = handle.notification().builder().title("wStats").body(body).show() {
+        log::warn!("update notification: {e}");
+    }
+    let mut s = app.settings.read().clone();
+    s.update_notified = Some(version.clone());
+    let _ = app.save(s, handle);
+}
+
+/// "Download wStats 0.4.0…", while a newer release is known.
+fn update_label(app: &App) -> Option<String> {
+    app.updater.status().latest.map(|v| format!("{} {v}…", lang::tr("Baixar o wStats", "Download wStats")))
+}
+
+#[tauri::command]
 fn open_settings(handle: AppHandle) {
     show_settings(&handle);
 }
@@ -170,6 +225,10 @@ impl App {
 
     fn apply(&self, s: &Settings) {
         lang::set(s.language);
+        // Turned on in Settings: check right away rather than tomorrow.
+        if !self.updater.enabled.swap(s.check_updates, Ordering::Relaxed) && s.check_updates {
+            self.updater.check_now();
+        }
         self.control.interval_ms.store(s.interval_ms, Ordering::Relaxed);
         *self.control.fans.write() = stats::FanPrefs { hidden: s.hidden_fans.clone(), bar: s.bar_fan.clone() };
         if let Some(p) = &self.control.pinger {
@@ -189,6 +248,7 @@ impl App {
 const MENU_AUTOSTART: u32 = 1;
 const MENU_QUIT: u32 = 2;
 const MENU_SETTINGS: u32 = 3;
+const MENU_UPDATE: u32 = 4;
 
 fn strip_event(handle: &AppHandle, app: &Arc<App>, event: strip::Event) {
     match event {
@@ -196,18 +256,23 @@ fn strip_event(handle: &AppHandle, app: &Arc<App>, event: strip::Event) {
         strip::Event::Menu { x, y } => {
             app.popup.hide();
             let autostart = handle.autolaunch().is_enabled().unwrap_or(false);
-            let items = [
-                (MENU_SETTINGS, lang::tr("Configurações…", "Settings…"), false),
+            let update = update_label(app);
+            let mut items = vec![(MENU_SETTINGS, lang::tr("Configurações…", "Settings…"), false)];
+            if let Some(label) = &update {
+                items.push((MENU_UPDATE, label.as_str(), false));
+            }
+            items.extend([
                 (0, "", false),
                 (MENU_AUTOSTART, lang::tr("Iniciar com o Windows", "Start with Windows"), autostart),
                 (0, "", false),
                 (MENU_QUIT, lang::tr("Sair do wStats", "Quit wStats"), false),
-            ];
+            ]);
             match strip::context_menu(&app.strip, x, y, &items) {
                 Some(MENU_SETTINGS) => {
                     let h = handle.clone();
                     let _ = handle.run_on_main_thread(move || show_settings(&h));
                 }
+                Some(MENU_UPDATE) => start_update(handle),
                 Some(MENU_AUTOSTART) => toggle_autostart(handle),
                 Some(MENU_QUIT) => handle.exit(0),
                 _ => {}
@@ -226,7 +291,11 @@ fn tray_menu(handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let autostart = CheckMenuItem::with_id(handle, "autostart", lang::tr("Iniciar com o Windows", "Start with Windows"), true, enabled, None::<&str>)?;
     let quit = MenuItem::with_id(handle, "quit", lang::tr("Sair do wStats", "Quit wStats"), true, None::<&str>)?;
     let settings = MenuItem::with_id(handle, "settings", lang::tr("Configurações…", "Settings…"), true, None::<&str>)?;
-    Menu::with_items(handle, &[&settings, &PredefinedMenuItem::separator(handle)?, &autostart, &PredefinedMenuItem::separator(handle)?, &quit])
+    let menu = Menu::with_items(handle, &[&settings, &PredefinedMenuItem::separator(handle)?, &autostart, &PredefinedMenuItem::separator(handle)?, &quit])?;
+    if let Some(label) = handle.try_state::<Arc<App>>().and_then(|app| update_label(&app)) {
+        menu.insert(&MenuItem::with_id(handle, "update", label, true, None::<&str>)?, 1)?;
+    }
+    Ok(menu)
 }
 
 fn tray(handle: &AppHandle) -> tauri::Result<()> {
@@ -237,6 +306,7 @@ fn tray(handle: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|h, e| match e.id().as_ref() {
             "settings" => show_settings(h),
+            "update" => start_update(h),
             "autostart" => toggle_autostart(h),
             "quit" => h.exit(0),
             _ => {}
@@ -251,6 +321,7 @@ pub fn run() {
         // Launching wStats again while it runs opens its settings.
         .plugin(tauri_plugin_single_instance::init(|handle, _, _| show_settings(handle)))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_state,
             get_long_history,
@@ -266,7 +337,11 @@ pub fn run() {
             strip_preview,
             get_autostart,
             set_autostart,
-            open_settings
+            open_settings,
+            update_status,
+            check_update,
+            download_update,
+            open_release_notes
         ])
         .setup(|tauri_app| {
             // Here, not before the builder: a second instance exits in the single-instance
@@ -296,6 +371,10 @@ pub fn run() {
             *strip_shared.modules.write() = settings.modules.clone();
             *strip_shared.position.write() = settings.position;
             *strip_shared.monitor.write() = settings.monitor.clone();
+            let updater = {
+                let handle = handle.clone();
+                update::Updater::spawn(settings.check_updates, move |st| update_changed(&handle, st))
+            };
             let app = Arc::new(App {
                 store: store.clone(),
                 control: control.clone(),
@@ -303,6 +382,7 @@ pub fn run() {
                 popup: Popup::new(handle.clone(), control.clone(), strip_shared.clone()),
                 settings: RwLock::new(settings),
                 settings_path,
+                updater,
             });
             handle.manage(app.clone());
             app.apply(&app.settings.read().clone());

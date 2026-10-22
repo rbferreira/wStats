@@ -130,6 +130,10 @@ pub struct Settings {
     pub hidden_fans: Vec<String>,
     /// The fan the taskbar shows; `None` = the fastest.
     pub bar_fan: Option<String>,
+    /// Ask GitHub once a day whether there is a newer release.
+    pub check_updates: bool,
+    /// The release already announced with a notification, so it is announced once.
+    pub update_notified: Option<String>,
 }
 
 /// The two colours every chart is built from, as `#RRGGBB`.
@@ -166,6 +170,8 @@ impl Default for Settings {
             npu_offered: false,
             hidden_fans: Vec::new(),
             bar_fan: None,
+            check_updates: true,
+            update_notified: None,
         }
     }
 }

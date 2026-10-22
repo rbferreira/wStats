@@ -111,6 +111,11 @@ body.settings {
   background: var(--text-2);
 }
 
+/* A new release: Settings › About. */
+.nav-dot.update {
+  background: var(--green);
+}
+
 .icon svg,
 .grip svg,
 .item-icon svg {
@@ -549,4 +554,11 @@ body.settings {
   color: var(--text-2);
   max-width: 340px;
   text-align: center;
+}
+
+.about-version {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }

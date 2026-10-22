@@ -9,7 +9,7 @@ import { onLanguageChange, t } from "./i18n";
 import { MODULES } from "./modules";
 import type { Module } from "./modules/common";
 import { applySettings } from "./theme";
-import type { ModuleId, MonitorInfo, Settings } from "./types";
+import type { ModuleId, MonitorInfo, Settings, UpdateStatus } from "./types";
 import { h, setText } from "./ui";
 
 const ALL: ModuleId[] = ["cpu", "mem", "disk", "net", "gpu", "npu", "battery", "temp", "fans", "power"];
@@ -41,6 +41,8 @@ const DEFAULTS: Settings = {
   side: "left",
   hiddenFans: [],
   barFan: null,
+  checkUpdates: true,
+  updateNotified: null,
 };
 
 const PALETTE = ["#3478F6", "#78C04F", "#F5C542", "#EF8240", "#EF5350", "#E85D9E", "#A06CF0", "#5AC8E8"];
@@ -97,6 +99,9 @@ interface SensorStatus {
   board: number;
   notes: string[];
 }
+
+/** New releases, as the app last checked; null outside Tauri. */
+let updateStatus: UpdateStatus | null = null;
 
 /** The sensor service as last checked; null = check again when the page is shown. */
 let sensorStatus: SensorStatus | null = null;
@@ -190,6 +195,7 @@ function renderSidebar() {
       const b = h("button", `nav${p === page ? " active" : ""}`, icon(p));
       b.title = p === "general" ? t.set.general : p === "about" ? t.set.about : name(p);
       if (p !== "general" && p !== "about" && settings.modules.includes(p)) b.append(h("span", "nav-dot"));
+      if (p === "about" && updateStatus?.latest) b.append(h("span", "nav-dot update"));
       b.onclick = () => {
         page = p;
         if (SERVICE_PAGES.includes(p as ModuleId)) sensorStatus = null;
@@ -552,6 +558,48 @@ function sensorServiceGroup() {
   return group(t.set.sensorsGroup, state, h("div", "btn-row", ...buttons), ...hints);
 }
 
+/** The installed version, a newer one if GitHub has it, and the daily check's switch. */
+function updateGroup() {
+  const u = updateStatus;
+  const dot = (on: boolean) => h("span", `status-dot${on ? " on" : ""}`);
+  const lines: Node[] = [];
+  if (u?.busy) lines.push(h("p", "status-line", dot(false), t.set.checkingUpdates));
+  else if (u?.latest) lines.push(h("p", "status-line", dot(true), t.set.newVersion(u.latest)));
+  else if (u?.checkedAt) lines.push(h("p", "status-line", dot(false), t.set.upToDate));
+
+  const buttons: HTMLElement[] = [];
+  if (u?.latest) {
+    const install = h("button", "btn", t.set.updateNow);
+    install.onclick = () => invoke("download_update").catch(console.error);
+    const notes = h("button", "btn", t.set.releaseNotes);
+    notes.onclick = () => invoke("open_release_notes").catch(console.error);
+    buttons.push(install, notes);
+  } else {
+    const check = h("button", "btn", t.set.checkNow);
+    check.disabled = !u || u.busy;
+    check.onclick = () => invoke("check_update").catch(console.error);
+    buttons.push(check);
+  }
+
+  const hints: Node[] = [];
+  if (u?.latest) hints.push(h("p", "field-hint", t.set.updateHint));
+  if (u?.error) hints.push(h("p", "field-hint error", t.set.failed(u.error)));
+  if (u?.checkedAt && !u.latest) hints.push(h("p", "field-hint", t.set.lastChecked(new Date(u.checkedAt * 1000).toLocaleString())));
+
+  return group(
+    t.set.updates,
+    ...lines,
+    h("div", "btn-row", ...buttons),
+    ...hints,
+    h(
+      "div",
+      "field",
+      h("div", "field row", h("div", "field-label", t.set.checkUpdates), toggle(settings.checkUpdates, (v) => update((s) => (s.checkUpdates = v)))),
+      h("p", "field-hint", t.set.checkUpdatesHint),
+    ),
+  );
+}
+
 function aboutPage() {
   stage.replaceChildren(
     h("header", "stage-head", h("h1", "", t.set.about)),
@@ -561,9 +609,11 @@ function aboutPage() {
       h("div", "about-mark", icon("cpu")),
       h("h2", "about-name", "wStats"),
       h("p", "about-tag", t.set.tagline),
+      updateStatus ? h("p", "about-version", t.set.version(updateStatus.current)) : "",
     ),
   );
   options.replaceChildren(
+    updateGroup(),
     group(t.set.howItWorks, h("p", "prose", t.set.howItWorksProse)),
     group(t.set.data, h("p", "prose", t.set.dataProse)),
   );
@@ -586,11 +636,17 @@ async function boot() {
   if (inTauri) {
     invoke = (await import("@tauri-apps/api/core")).invoke;
     const { listen } = await import("@tauri-apps/api/event");
-    [settings, monitors, autostart] = await Promise.all([
+    [settings, monitors, autostart, updateStatus] = await Promise.all([
       invoke<Settings>("get_settings"),
       invoke<MonitorInfo[]>("list_monitors"),
       invoke<boolean>("get_autostart"),
+      invoke<UpdateStatus>("update_status"),
     ]);
+    await listen<UpdateStatus>("update", (e) => {
+      updateStatus = e.payload;
+      if (page === "about") render();
+      else renderSidebar();
+    });
     // Changes made elsewhere (e.g. the taskbar menu) show up here too.
     await listen<Settings>("settings", (e) => {
       if (JSON.stringify(e.payload) === JSON.stringify(settings)) return;
