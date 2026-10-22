@@ -114,6 +114,8 @@ struct Slot
     WriteableBitmap bitmap{nullptr};
     FrameworkElement widgets{nullptr};
     Thickness widgetsMargin{}, repeaterMargin{};
+    TranslateTransform shift{nullptr}; // recentres the icons; see Recenter
+    Transform repeaterTransform{nullptr};
     DispatcherTimer timer{nullptr};
     DispatcherTimer::Tick_revoker tick;
     FrameworkElement::PointerMoved_revoker moved;
@@ -295,6 +297,9 @@ void Teardown(Slot& f)
     f.rightTapped.revoke();
     if (f.widgets) f.widgets.Margin(f.widgetsMargin);
     if (f.repeater) f.repeater.Margin(f.repeaterMargin);
+    if (f.repeater && f.shift) f.repeater.RenderTransform(f.repeaterTransform);
+    f.shift = nullptr;
+    f.repeaterTransform = nullptr;
     if (f.root && f.host)
     {
         uint32_t index;
@@ -391,6 +396,66 @@ double TrayInset(Slot& f)
     return 0;
 }
 
+/// Whether the taskbar centres its icons (the Windows 11 default) rather than aligning
+/// them left. Every frame asks on every tick, so the setting is read at most once a second.
+bool Centered()
+{
+    static std::atomic<ULONGLONG> readAt{0};
+    static std::atomic<bool> centered{true};
+    ULONGLONG now = GetTickCount64();
+    if (now - readAt > 1000)
+    {
+        DWORD value = 1, size = sizeof value;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"TaskbarAl", RRF_RT_REG_DWORD,
+                         nullptr, &value, &size) != ERROR_SUCCESS)
+            value = 1; // never set: centred
+        centered = value != 0;
+        readAt = now;
+    }
+    return centered;
+}
+
+/// Puts centred icons back in the middle of the bar. The repeater centres its icons in
+/// whatever width it is given, so reserving the strip's room on one side (`reserved`,
+/// DIPs: positive on the left, negative on the right) moves them half of it away. A
+/// render transform moves them back, only as far as the free space beside them allows.
+/// Not a matching margin on the other side: that leaves less room, and on a narrow bar
+/// Windows sends icons to the overflow menu.
+void Recenter(Slot& f, double reserved)
+{
+    double shift = 0;
+    if (reserved != 0 && Centered())
+    {
+        // The icons' extent, from layout positions (the repeater's own transform is not
+        // part of them, so this does not feed back on itself).
+        double width = f.repeater.ActualWidth(), first = width, last = 0;
+        for (int i = 0, n = VisualTreeHelper::GetChildrenCount(f.repeater); i < n; i++)
+        {
+            auto child = VisualTreeHelper::GetChild(f.repeater, i).try_as<FrameworkElement>();
+            if (!child || child.ActualWidth() <= 0 || child.Visibility() != Visibility::Visible) continue;
+            double x = child.TransformToVisual(f.repeater).TransformPoint({0, 0}).X;
+            if (x + child.ActualWidth() <= 0 || x >= width) continue; // recycled, parked out of view
+            first = std::min(first, x);
+            last = std::max(last, x + child.ActualWidth());
+        }
+        if (last > first) shift = reserved > 0 ? -std::min(reserved / 2, first) : std::min(-reserved / 2, width - last);
+    }
+    if (!f.shift)
+    {
+        if (Near(shift, 0)) return;
+        f.shift = TranslateTransform();
+    }
+    // The repeater comes with an identity MatrixTransform; it is put back on teardown.
+    // Should the taskbar set another one later, ours replaces it again.
+    auto current = f.repeater.RenderTransform();
+    if (current != f.shift)
+    {
+        f.repeaterTransform = current;
+        f.repeater.RenderTransform(f.shift);
+    }
+    if (!Near(f.shift.X(), shift)) f.shift.X(shift);
+}
+
 void Layout(Slot& f)
 {
     double s = RenderScale();
@@ -411,6 +476,7 @@ void Layout(Slot& f)
 
     bool left = g_shared.header->position == wstats::Left;
     bool widgetsShown = f.widgets && f.widgets.ActualWidth() > 0;
+    double reserved = 0; // room taken from the repeater, for Recenter
     if (left && widgetsShown)
     {
         // The Widgets button is wider than what it draws (it keeps ~58 DIP of slack on
@@ -434,6 +500,7 @@ void Layout(Slot& f)
         SetMargin(f.repeater, {f.repeaterMargin.Left + reserve, f.repeaterMargin.Top, f.repeaterMargin.Right, f.repeaterMargin.Bottom});
         f.host.HorizontalAlignment(HorizontalAlignment::Left);
         SetMargin(f.host, {f.repeaterMargin.Left + kGap, 0, 0, 0});
+        reserved = reserve;
     }
     else
     {
@@ -442,7 +509,9 @@ void Layout(Slot& f)
         SetMargin(f.repeater, {f.repeaterMargin.Left, f.repeaterMargin.Top, f.repeaterMargin.Right + tray + reserve, f.repeaterMargin.Bottom});
         f.host.HorizontalAlignment(HorizontalAlignment::Right);
         SetMargin(f.host, {0, 0, tray + kGap, 0});
+        reserved = -(tray + reserve);
     }
+    Recenter(f, reserved);
 }
 
 /// Copies a stable frame out of shared memory (seqlock). False if nothing new or wStats
