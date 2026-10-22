@@ -4,8 +4,8 @@
 //! `xaml.rs` and `tap/`), so the taskbar lays its icons out around it, exactly as it does
 //! for the Widgets button. We render here and publish pixels; Explorer shows them.
 //!
-//! Fallback mode, **window**: a layered child window of `Shell_TrayWnd`, placed in the
-//! free gap found through UI Automation (`taskbar.rs`). Used only when the XAML route is
+//! Fallback mode, **window**: a layered child window of the taskbar (one per taskbar with
+//! "all monitors"), placed in the free gap found through UI Automation (`taskbar.rs`). Used only when the XAML route is
 //! unavailable (e.g. ExplorerPatcher's Windows 10 taskbar).
 //!
 //! Everything runs on one thread with a hidden top-level *host* window, which receives
@@ -100,7 +100,61 @@ impl Shared {
 
 enum Mode {
     Xaml { surface: xaml::Surface, last_beat: i32, beat_at: Instant, failures: u32, core_mtime: Option<std::time::SystemTime> },
-    Window { hwnd: HWND, embedded: bool, scanner: Option<taskbar::Scanner> },
+    /// One window per taskbar shown on; the scanner finds the free gap on each.
+    Window { bars: Vec<Bar>, scanner: Option<taskbar::Scanner> },
+}
+
+/// The fallback window on one taskbar. Each has its own layout and renderer: the
+/// taskbars can be on monitors with different DPIs.
+struct Bar {
+    taskbar: HWND,
+    hwnd: HWND,
+    /// A real child of the taskbar (hides with it); otherwise a topmost popup.
+    embedded: bool,
+    renderer: Renderer,
+    slots: Vec<Slot>,
+    width: i32,
+    height: i32,
+    scale: f32,
+    hover: Option<usize>,
+    tracking: bool,
+}
+
+impl Drop for Bar {
+    fn drop(&mut self) {
+        if !self.hwnd.is_invalid() {
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+}
+
+/// What every frame shares, whichever taskbar it is drawn for.
+#[derive(Clone, Copy)]
+struct Style {
+    light: bool,
+    active: Option<ModuleId>,
+    primary: Rgba,
+    secondary: Rgba,
+    look: Look,
+}
+
+impl Style {
+    fn frame(self, slots: &[Slot], width: i32, height: i32, scale: f32, hover: Option<usize>) -> Frame {
+        Frame {
+            slots: slots.to_vec(),
+            width,
+            height,
+            scale,
+            light: self.light,
+            hover,
+            active: self.active,
+            primary: self.primary,
+            secondary: self.secondary,
+            look: self.look,
+        }
+    }
 }
 
 struct State {
@@ -117,7 +171,6 @@ struct State {
     scale: f32,
     light: bool,
     hover: Option<usize>,
-    tracking: bool,
     xaml_retry_at: Instant,
     xaml_retry_every: Duration,
 }
@@ -162,7 +215,7 @@ fn run(store: StoreHandle, shared: Arc<Shared>, on_event: Box<dyn Fn(Event)>) ->
             on_event,
             renderer: Renderer::new()?,
             host,
-            mode: Mode::Window { hwnd: HWND::default(), embedded: false, scanner: None },
+            mode: Mode::Window { bars: Vec::new(), scanner: None },
             taskbar: HWND::default(),
             slots: Vec::new(),
             width: 0,
@@ -170,7 +223,6 @@ fn run(store: StoreHandle, shared: Arc<Shared>, on_event: Box<dyn Fn(Event)>) ->
             scale: 1.0,
             light: crate::win::taskbar_is_light(),
             hover: None,
-            tracking: false,
             xaml_retry_at: Instant::now(),
             xaml_retry_every: RETRY_XAML.0,
         };
@@ -197,22 +249,45 @@ fn find(parent: Option<HWND>, class: PCWSTR) -> Option<HWND> {
     unsafe { FindWindowExW(parent, None, class, PCWSTR::null()).ok() }.filter(|h| !h.is_invalid())
 }
 
-/// The taskbar window on the monitor covering `monitor`: the primary one is
-/// `Shell_TrayWnd`, every other monitor has a `Shell_SecondaryTrayWnd`.
-fn taskbar_on(monitor: RECT) -> Option<HWND> {
-    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect, MonitorFromWindow};
-    let target = unsafe { MonitorFromRect(&monitor, MONITOR_DEFAULTTONULL) };
-    let primary = find(None, w!("Shell_TrayWnd"));
-    let mut candidates: Vec<HWND> = primary.into_iter().collect();
+/// Every taskbar window: the primary monitor's is `Shell_TrayWnd`, every other monitor
+/// has a `Shell_SecondaryTrayWnd`.
+fn taskbars() -> Vec<HWND> {
+    let mut all: Vec<HWND> = find(None, w!("Shell_TrayWnd")).into_iter().collect();
     let mut after: Option<HWND> = None;
     while let Ok(h) = unsafe { FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) } {
         if h.is_invalid() {
             break;
         }
-        candidates.push(h);
+        all.push(h);
         after = Some(h);
     }
-    candidates.into_iter().find(|h| unsafe { MonitorFromWindow(*h, MONITOR_DEFAULTTONULL) } == target)
+    all
+}
+
+/// The taskbar window on the monitor covering `monitor`.
+fn taskbar_on(monitor: RECT) -> Option<HWND> {
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect, MonitorFromWindow};
+    let target = unsafe { MonitorFromRect(&monitor, MONITOR_DEFAULTTONULL) };
+    taskbars().into_iter().find(|h| unsafe { MonitorFromWindow(*h, MONITOR_DEFAULTTONULL) } == target)
+}
+
+/// The slot under (x, y): compact columns hold two, one over the other.
+fn slot_at(slots: &[Slot], height: i32, x: i32, y: i32) -> Option<usize> {
+    let top = y < height / 2;
+    slots.iter().position(|s| {
+        x >= s.x
+            && x < s.x + s.w
+            && match s.row {
+                Row::Full => true,
+                Row::Top => top,
+                Row::Bottom => !top,
+            }
+    })
+}
+
+fn bar_of(mode: &mut Mode, hwnd: HWND) -> Option<&mut Bar> {
+    let Mode::Window { bars, .. } = mode else { return None };
+    bars.iter_mut().find(|b| b.hwnd == hwnd)
 }
 
 fn rect_of(h: HWND) -> RECT {
@@ -254,15 +329,12 @@ impl State {
     /// On the fallback window: Explorer may accept the element now (it was restarted, or
     /// a stuck reload cleared). Keeps the window unless the switch works.
     fn retry_xaml(&mut self) {
-        let Mode::Window { hwnd, .. } = &self.mode else { return };
-        let hwnd = *hwnd;
-        let window = std::mem::replace(&mut self.mode, Mode::Window { hwnd: HWND::default(), embedded: false, scanner: None });
+        if !matches!(self.mode, Mode::Window { .. }) {
+            return;
+        }
+        let window = std::mem::replace(&mut self.mode, Mode::Window { bars: Vec::new(), scanner: None });
         if self.try_xaml() {
-            if !hwnd.is_invalid() {
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-            }
+            drop(window); // destroys the windows
             self.xaml_retry_every = RETRY_XAML.0;
             self.update(true);
         } else {
@@ -298,8 +370,7 @@ impl State {
     fn fallback_to_window(&mut self) {
         log::info!("strip: using a layered window");
         self.xaml_retry_at = Instant::now();
-        let scanner = Some(taskbar::Scanner::new());
-        self.mode = Mode::Window { hwnd: HWND::default(), embedded: false, scanner };
+        self.mode = Mode::Window { bars: Vec::new(), scanner: Some(taskbar::Scanner::new()) };
         self.update(true);
     }
 
@@ -353,18 +424,7 @@ impl State {
                     }
                 }
             }
-            Mode::Window { hwnd, embedded, .. } => {
-                let alive = !hwnd.is_invalid() && unsafe { IsWindow(Some(*hwnd)).as_bool() };
-                // After a monitor change the window is still a child of the old taskbar,
-                // while placement already measures the new one: build it again there.
-                let moved = alive && *embedded && unsafe { GetParent(*hwnd) }.ok() != Some(self.taskbar);
-                if !alive || moved {
-                    self.create_window();
-                }
-                if relayout || !alive || moved {
-                    self.place_window();
-                }
-            }
+            Mode::Window { .. } => self.sync_bars(relayout),
         }
         self.paint();
     }
@@ -402,55 +462,37 @@ impl State {
         self.update(true);
     }
 
+    fn style(&self) -> Style {
+        let colors = *self.shared.colors.read();
+        Style { light: self.light, active: *self.shared.active.lock(), primary: colors.0, secondary: colors.1, look: *self.shared.look.read() }
+    }
+
     fn paint(&mut self) {
-        if self.width == 0 {
-            return;
-        }
-        let frame = Frame {
-            slots: self.slots.clone(),
-            width: self.width,
-            height: self.height,
-            scale: self.scale,
-            light: self.light,
-            hover: self.hover,
-            active: *self.shared.active.lock(),
-            primary: self.shared.colors.read().0,
-            secondary: self.shared.colors.read().1,
-            look: *self.shared.look.read(),
-        };
-        {
-            let store = self.store.read();
-            if let Err(e) = self.renderer.paint(&frame, &store) {
-                log::warn!("strip paint failed: {e:?}");
-                return;
-            }
-        }
+        let style = self.style();
         match &mut self.mode {
             Mode::Xaml { surface, .. } => {
+                if self.width == 0 {
+                    return;
+                }
+                let frame = style.frame(&self.slots, self.width, self.height, self.scale, self.hover);
+                if let Err(e) = self.renderer.paint(&frame, &self.store.read()) {
+                    log::warn!("strip paint failed: {e:?}");
+                    return;
+                }
                 if let Some((px, w, h)) = self.renderer.pixels() {
                     surface.publish(px, w, h);
                 }
             }
-            Mode::Window { hwnd, .. } => {
-                if !hwnd.is_invalid() {
-                    let _ = self.renderer.present_layered(*hwnd);
+            Mode::Window { bars, .. } => {
+                for bar in bars {
+                    bar.paint(&self.store, style);
                 }
             }
         }
     }
 
-    /// The slot under (x, y): compact columns hold two, one over the other.
     fn slot_at(&self, x: i32, y: i32) -> Option<usize> {
-        let top = y < self.height / 2;
-        self.slots.iter().position(|s| {
-            x >= s.x
-                && x < s.x + s.w
-                && match s.row {
-                    Row::Full => true,
-                    Row::Top => top,
-                    Row::Bottom => !top,
-                }
-        })
+        slot_at(&self.slots, self.height, x, y)
     }
 
     fn set_hover(&mut self, hover: Option<usize>) {
@@ -460,27 +502,78 @@ impl State {
         }
     }
 
-    /// Screen rect of slot `i`, given the element's screen origin.
-    fn slot_rect(&self, i: usize, origin: (i32, i32)) -> Option<(ModuleId, RECT)> {
-        let s = self.slots.get(i)?;
-        let rect = RECT { left: origin.0 + s.x, top: origin.1, right: origin.0 + s.x + s.w, bottom: origin.1 + self.height };
-        Some((s.module, rect))
-    }
-
     // ---- window mode ---------------------------------------------------------------
 
+    /// One window on the chosen taskbar, or on every visible one with "all monitors".
+    /// A window whose taskbar went away (Explorer restarted, monitor unplugged or no
+    /// longer chosen) is destroyed with its bar.
+    fn sync_bars(&mut self, relayout: bool) {
+        let all = self.shared.monitor.read().as_deref() == Some(ALL_MONITORS);
+        let wanted: Vec<HWND> =
+            if all { taskbars().into_iter().filter(|h| unsafe { IsWindowVisible(*h).as_bool() }).collect() } else { vec![self.taskbar] };
+        let modules = self.modules();
+        let look = *self.shared.look.read();
+        let left = *self.shared.position.read() == Position::Left;
+        let Mode::Window { bars, scanner: Some(scanner) } = &mut self.mode else { return };
+        scanner.retain(&wanted);
+        bars.retain(|b| wanted.contains(&b.taskbar) && unsafe { IsWindow(Some(b.taskbar)).as_bool() });
+        for &taskbar in &wanted {
+            if !bars.iter().any(|b| b.taskbar == taskbar) {
+                match Bar::new(taskbar) {
+                    Ok(bar) => bars.push(bar),
+                    Err(e) => log::warn!("strip window renderer: {e:?}"),
+                }
+            }
+        }
+        for bar in bars {
+            let alive = !bar.hwnd.is_invalid() && unsafe { IsWindow(Some(bar.hwnd)).as_bool() };
+            if !alive {
+                bar.create_window();
+            }
+            if relayout || !alive {
+                bar.place(scanner, modules.clone(), look, left);
+            }
+        }
+    }
+
+    /// Fires an event after releasing the state borrow: handlers may pump messages.
+    fn emit(event: Event) {
+        STATE.with(|st| {
+            if let Ok(g) = st.try_borrow() {
+                if let Some(s) = g.as_ref() {
+                    (s.on_event)(event);
+                }
+            }
+        });
+    }
+}
+
+impl Bar {
+    fn new(taskbar: HWND) -> windows::core::Result<Self> {
+        Ok(Self {
+            taskbar,
+            hwnd: HWND::default(),
+            embedded: false,
+            renderer: Renderer::new()?,
+            slots: Vec::new(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            hover: None,
+            tracking: false,
+        })
+    }
+
     fn create_window(&mut self) {
-        let taskbar = self.taskbar;
-        let Mode::Window { hwnd, embedded, .. } = &mut self.mode else { return };
         unsafe {
-            if !hwnd.is_invalid() {
-                let _ = DestroyWindow(*hwnd);
+            if !self.hwnd.is_invalid() {
+                let _ = DestroyWindow(self.hwnd);
             }
             let instance = GetModuleHandleW(None).ok().map(Into::into);
             let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             // A real child of the taskbar hides with it. Needs the Windows 8+ manifest entry.
-            let child = CreateWindowExW(ex, w!("wStatsStrip"), w!(""), WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, Some(taskbar), None, instance, None);
-            (*hwnd, *embedded) = match child {
+            let child = CreateWindowExW(ex, w!("wStatsStrip"), w!(""), WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, Some(self.taskbar), None, instance, None);
+            (self.hwnd, self.embedded) = match child {
                 Ok(h) => (h, true),
                 Err(e) => {
                     log::warn!("cannot parent strip to the taskbar ({e:?}); using a topmost window");
@@ -496,17 +589,17 @@ impl State {
 
     /// Puts the window in the free gap (left or right, per settings) and drops trailing
     /// items that do not fit. It never covers a taskbar button.
-    fn place_window(&mut self) {
-        let Mode::Window { hwnd, embedded, scanner } = &self.mode else { return };
-        let (hwnd, embedded) = (*hwnd, *embedded);
+    fn place(&mut self, scanner: &taskbar::Scanner, mut modules: Vec<ModuleId>, look: Look, left: bool) {
         let tb = rect_of(self.taskbar);
+        self.scale = unsafe { GetDpiForWindow(self.taskbar) }.max(96) as f32 / 96.0;
+        self.height = tb.bottom - tb.top;
         let s = self.scale;
         let margin = (4.0 * s) as i32;
 
         // Hidden until the first scan says where the free space is.
-        let Some(scan) = scanner.as_ref().and_then(|sc| sc.scan(self.taskbar, tb)) else {
+        let Some(scan) = scanner.scan(self.taskbar, tb) else {
             unsafe {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
             return;
         };
@@ -515,12 +608,10 @@ impl State {
             .or_else(|| find(Some(self.taskbar), w!("TrayNotifyWnd")).map(|h| rect_of(h).left))
             .unwrap_or(tb.right - (88.0 * s) as i32);
 
-        let mut modules = self.modules();
-        let look = *self.shared.look.read();
         let (_, full) = render::layout(&modules, look, s);
         let smallest = (40.0 * s) as i32;
         let (left_x, left_room) = taskbar::fit_left(&scan.obstacles, tb.left, tb.right, tray_left, margin);
-        let use_left = *self.shared.position.read() == Position::Left && left_room >= smallest;
+        let use_left = left && left_room >= smallest;
         let room = if use_left { left_room } else { taskbar::fit(tray_left, &scan.obstacles, tb.left, full, margin).1 };
 
         let (mut slots, mut width) = render::layout(&modules, look, s);
@@ -532,23 +623,31 @@ impl State {
         self.width = width;
 
         let x = if use_left { left_x } else { taskbar::fit(tray_left, &scan.obstacles, tb.left, width, margin).0 - width };
-        let (x, y) = if embedded { (x - tb.left, 0) } else { (x, tb.top) };
+        let (x, y) = if self.embedded { (x - tb.left, 0) } else { (x, tb.top) };
         let visible = if width > 0 { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
         unsafe {
-            let insert = if embedded { HWND_TOP } else { HWND_TOPMOST };
-            let _ = SetWindowPos(hwnd, Some(insert), x, y, width.max(1), self.height, SWP_NOACTIVATE | visible);
+            let insert = if self.embedded { HWND_TOP } else { HWND_TOPMOST };
+            let _ = SetWindowPos(self.hwnd, Some(insert), x, y, width.max(1), self.height, SWP_NOACTIVATE | visible);
         }
     }
 
-    /// Fires an event after releasing the state borrow: handlers may pump messages.
-    fn emit(event: Event) {
-        STATE.with(|st| {
-            if let Ok(g) = st.try_borrow() {
-                if let Some(s) = g.as_ref() {
-                    (s.on_event)(event);
-                }
-            }
-        });
+    fn paint(&mut self, store: &StoreHandle, style: Style) {
+        if self.width == 0 || self.hwnd.is_invalid() {
+            return;
+        }
+        let frame = style.frame(&self.slots, self.width, self.height, self.scale, self.hover);
+        if let Err(e) = self.renderer.paint(&frame, &store.read()) {
+            log::warn!("strip paint failed: {e:?}");
+            return;
+        }
+        let _ = self.renderer.present_layered(self.hwnd);
+    }
+
+    /// Screen rect of slot `i`, given the window's screen origin.
+    fn slot_rect(&self, i: usize, origin: (i32, i32)) -> Option<(ModuleId, RECT)> {
+        let s = self.slots.get(i)?;
+        let rect = RECT { left: origin.0 + s.x, top: origin.1, right: origin.0 + s.x + s.w, bottom: origin.1 + self.height };
+        Some((s.module, rect))
     }
 }
 
@@ -626,8 +725,8 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             // old Explorer is gone. The XAML side is re-attached from the timer once the
             // new taskbar is ready; the window side is recreated right away.
             with_state(|s| {
-                if let Mode::Window { hwnd, .. } = &mut s.mode {
-                    *hwnd = HWND::default();
+                if let Mode::Window { bars, .. } = &mut s.mode {
+                    bars.clear();
                 }
                 s.update(true);
             });
@@ -639,22 +738,25 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 
 unsafe extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_MOUSEMOVE => {
+        WM_MOUSEMOVE | WM_MOUSELEAVE => {
             let (x, y) = point(lp);
             with_state(|s| {
-                if !s.tracking {
-                    let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
-                    s.tracking = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
+                let style = s.style();
+                let Some(bar) = bar_of(&mut s.mode, hwnd) else { return };
+                let hover = if msg == WM_MOUSELEAVE {
+                    bar.tracking = false;
+                    None
+                } else {
+                    if !bar.tracking {
+                        let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                        bar.tracking = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
+                    }
+                    slot_at(&bar.slots, bar.height, x, y)
+                };
+                if hover != bar.hover {
+                    bar.hover = hover;
+                    bar.paint(&s.store, style);
                 }
-                let hover = s.slot_at(x, y);
-                s.set_hover(hover);
-            });
-            LRESULT(0)
-        }
-        WM_MOUSELEAVE => {
-            with_state(|s| {
-                s.tracking = false;
-                s.set_hover(None);
             });
             LRESULT(0)
         }
@@ -665,7 +767,8 @@ unsafe extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 if msg == WM_RBUTTONUP {
                     return Some(Event::Menu { x: origin.left + x, y: origin.top + y });
                 }
-                let (module, rect) = s.slot_rect(s.slot_at(x, y)?, (origin.left, origin.top))?;
+                let bar = bar_of(&mut s.mode, hwnd)?;
+                let (module, rect) = bar.slot_rect(slot_at(&bar.slots, bar.height, x, y)?, (origin.left, origin.top))?;
                 Some(Event::Click { module, rect })
             })
             .flatten();
