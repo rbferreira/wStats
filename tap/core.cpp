@@ -323,8 +323,8 @@ void Shutdown(Slot& f)
 }
 
 /// Whether the element fell out of the frame's live tree. Explorer can rebuild a frame's
-/// content without removing the frame (turning the Widgets button off does), and the
-/// element then sits in a detached tree that is never drawn. A few calls per tick.
+/// content without removing the frame, and the element would then sit in a detached tree
+/// that is never drawn. A few calls per tick.
 bool Detached(Slot& f)
 {
     auto frame = f.frame.get();
@@ -394,6 +394,16 @@ double TrayInset(Slot& f)
         return std::max(0.0, f.root.ActualWidth() - x);
     }
     return 0;
+}
+
+/// Whether the Widgets button is on the bar. Turned off, it is not removed: the repeater
+/// parks it out of view (x around -10000) with its size intact, and placing the strip
+/// after it put the strip out of view too.
+bool WidgetsShown(Slot& f)
+{
+    if (!f.widgets || f.widgets.ActualWidth() <= 0 || f.widgets.Visibility() != Visibility::Visible) return false;
+    double x = f.widgets.TransformToVisual(f.repeater).TransformPoint({0, 0}).X;
+    return x + f.widgets.ActualWidth() > 0 && x < f.repeater.ActualWidth();
 }
 
 /// Whether the taskbar centres its icons (the Windows 11 default) rather than aligning
@@ -475,7 +485,7 @@ void Layout(Slot& f)
     }
 
     bool left = g_shared.header->position == wstats::Left;
-    bool widgetsShown = f.widgets && f.widgets.ActualWidth() > 0;
+    bool widgetsShown = WidgetsShown(f);
     double reserved = 0; // room taken from the repeater, for Recenter
     if (left && widgetsShown)
     {
