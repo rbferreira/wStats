@@ -254,6 +254,20 @@ export interface Settings {
   hiddenFans: string[];
   /** The fan the taskbar shows; null = the fastest. */
   barFan: string | null;
+  checkUpdates: boolean;
+  updateNotified: string | null;
+}
+
+/** New releases, as the app last checked (see update.rs). */
+export interface UpdateStatus {
+  current: string;
+  /** The latest release, when newer than this build. */
+  latest: string | null;
+  url: string | null;
+  /** Unix seconds of the last check that got an answer. */
+  checkedAt: number | null;
+  busy: boolean;
+  error: string | null;
 }
 
 export interface MonitorInfo {
