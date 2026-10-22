@@ -171,6 +171,7 @@ impl App {
     fn apply(&self, s: &Settings) {
         lang::set(s.language);
         self.control.interval_ms.store(s.interval_ms, Ordering::Relaxed);
+        *self.control.fans.write() = stats::FanPrefs { hidden: s.hidden_fans.clone(), bar: s.bar_fan.clone() };
         if let Some(p) = &self.control.pinger {
             *p.host.write() = s.ping_host.clone();
         }
@@ -287,6 +288,7 @@ pub fn run() {
             let store = stats::new_store(data_dir.map(|d| d.join("history.json")));
             let control = Arc::new(Control {
                 interval_ms: settings.interval_ms.into(),
+                fans: stats::FanPrefs { hidden: settings.hidden_fans.clone(), bar: settings.bar_fan.clone() }.into(),
                 pinger: Some(stats::ping::Pinger::spawn(settings.ping_host.clone())),
                 ..Default::default()
             });

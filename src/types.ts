@@ -121,6 +121,13 @@ export interface Gpu {
   dedicatedTotal: number;
   sharedUsed: number;
   sharedTotal: number;
+  /** From the driver, when it reports them. */
+  tempC: number | null;
+  fanRpm: number | null;
+  freqMhz: number | null;
+  powerW: number | null;
+  /** Each fan, in RPM (NVIDIA); 0 while stopped. */
+  fansRpm: number[];
 }
 
 export interface Npu {
@@ -166,7 +173,12 @@ export interface ThermalMode {
 export interface Sensors {
   power: Reading[];
   temps: Reading[];
+  /** Minus the fans hidden in Settings. */
   fans: Reading[];
+  /** Every fan found, hidden ones included. */
+  allFans: Reading[];
+  /** The taskbar's fan; null = the fastest. */
+  barFan: string | null;
   thermalMode: ThermalMode | null;
 }
 
@@ -238,6 +250,10 @@ export interface Settings {
   side: "left" | "right";
   /** The NPU item was added once on this machine (Rust decides; kept as is). */
   npuOffered?: boolean;
+  /** Fans (reading ids) left out of the panel and the taskbar. */
+  hiddenFans: string[];
+  /** The fan the taskbar shows; null = the fastest. */
+  barFan: string | null;
 }
 
 export interface MonitorInfo {

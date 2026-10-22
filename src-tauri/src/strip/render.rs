@@ -1038,7 +1038,7 @@ impl Ctx<'_> {
             ModuleId::Disk => pct(disk_used(snap) * 100.0),
             ModuleId::Battery => snap.battery.as_ref().map_or_else(none, |b| pct(b.percent)),
             ModuleId::Temp => snap.headline_temp().map_or_else(none, |t| Reading::Value { value: format!("{}°", t.round() as i32), unit: "" }),
-            ModuleId::Fans => snap.sensors.fastest_fan().map_or_else(none, |f| Reading::Value { value: (f.round() as i32).to_string(), unit: "" }),
+            ModuleId::Fans => snap.sensors.bar_fan_rpm().map_or_else(none, |f| Reading::Value { value: (f.round() as i32).to_string(), unit: "" }),
             ModuleId::Power => snap.sensors.package_watts().map_or_else(none, |p| Reading::Value { value: self.r.number(p, 1), unit: "W" }),
             ModuleId::Net => {
                 let (up, down, unit) = self.r.rates(snap.net.up, snap.net.down);

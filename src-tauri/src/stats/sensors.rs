@@ -4,7 +4,8 @@
 //! - GPU temperature/fan, gathered by the GPU collector (D3DKMT) and folded in here;
 //! - battery charge/discharge power, from the battery collector.
 //!
-//! CPU die temperature and laptop fans need a kernel driver and are not covered here.
+//! CPU die temperature, fans, and CPU power where Windows does not publish it (desktops,
+//! AMD) need a driver: the sensor service reads those (see service.rs).
 
 use super::model::{Reading, Sensors};
 use super::pdh::{Counter, Query};
@@ -14,7 +15,7 @@ pub struct SensorCollector {
 }
 
 /// RAPL domain -> label. Unknown domains keep their raw name.
-fn domain_label(instance: &str, pt: bool) -> Option<&'static str> {
+pub(super) fn domain_label(instance: &str, pt: bool) -> Option<&'static str> {
     let tr = |a, b| if pt { a } else { b };
     let domain = instance.rsplit('_').next()?;
     Some(match domain {
@@ -56,9 +57,7 @@ impl SensorCollector {
                     value: (mw / 1000.0) as f32,
                 })
                 .collect(),
-            temps: Vec::new(),
-            fans: Vec::new(),
-            thermal_mode: None,
+            ..Default::default()
         }
     }
 }

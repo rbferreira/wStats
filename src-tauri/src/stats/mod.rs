@@ -10,6 +10,7 @@ pub mod long;
 mod mem;
 mod net;
 mod npu;
+mod nvml;
 mod pdh;
 pub mod ping;
 mod sensors;
@@ -54,6 +55,16 @@ pub struct Control {
     /// Set while the settings window is open: its live previews show processes too.
     pub settings_open: AtomicBool,
     pub pinger: Option<Arc<ping::Pinger>>,
+    /// Fan choices from Settings.
+    pub fans: RwLock<FanPrefs>,
+}
+
+#[derive(Default, Clone)]
+pub struct FanPrefs {
+    /// Reading ids left out of the panel and the taskbar.
+    pub hidden: Vec<String>,
+    /// The taskbar's fan; `None` = the fastest.
+    pub bar: Option<String>,
 }
 
 pub fn spawn(store: Shared, control: Arc<Control>, on_tick: impl Fn(&Snapshot) + Send + 'static) {
@@ -132,6 +143,10 @@ fn run(store: Shared, control: Arc<Control>, on_tick: impl Fn(&Snapshot)) {
         }
         fold_gpu_sensors(&mut snap);
         {
+            let prefs = control.fans.read();
+            snap.sensors.apply_fan_prefs(&prefs.hidden, prefs.bar.as_ref());
+        }
+        {
             let mut s = store.write();
             s.history.record(&snap);
             s.long.record(&snap);
@@ -145,15 +160,24 @@ fn run(store: Shared, control: Arc<Control>, on_tick: impl Fn(&Snapshot)) {
     }
 }
 
-/// GPU temperatures and fans (from D3DKMT) belong in the sensor list too.
+/// GPU temperatures, fans and power belong in the sensor lists too.
 fn fold_gpu_sensors(s: &mut Snapshot) {
     for (i, g) in s.gpus.iter().enumerate() {
         let label = if s.gpus.len() > 1 { format!("GPU {}", i + 1) } else { "GPU".to_string() };
         if let Some(t) = g.temp_c {
             s.sensors.temps.push(model::Reading { id: format!("gpu{i}"), label: label.clone(), value: t });
         }
-        if let Some(f) = g.fan_rpm {
-            s.sensors.fans.push(model::Reading { id: format!("gpu{i}-fan"), label, value: f as f32 });
+        if g.fans_rpm.len() > 1 {
+            // One row per fan: "GPU 1", "GPU 2" (or "GPU 2 (1)" with several GPUs).
+            for (n, f) in g.fans_rpm.iter().enumerate() {
+                let name = if s.gpus.len() > 1 { format!("{label} ({})", n + 1) } else { format!("{label} {}", n + 1) };
+                s.sensors.fans.push(model::Reading { id: format!("gpu{i}-fan{n}"), label: name, value: *f as f32 });
+            }
+        } else if let Some(f) = g.fan_rpm {
+            s.sensors.fans.push(model::Reading { id: format!("gpu{i}-fan"), label: label.clone(), value: f as f32 });
+        }
+        if let Some(w) = g.power_w {
+            s.sensors.power.push(model::Reading { id: format!("gpu{i}-power"), label, value: w });
         }
     }
 }
@@ -214,7 +238,7 @@ mod tests {
             m.used >> 20, m.total >> 20, m.cached >> 20, m.modified >> 20, m.free >> 20, m.swap_used >> 20, m.swap_total >> 20);
         println!("disk read={:.0} write={:.0} disks={:?}", d.read, d.write, d.disks.iter().map(|x| &x.name).collect::<Vec<_>>());
         for v in &d.volumes { println!("  vol {} {} {} {}GB free of {}GB", v.mount, v.label, v.fs, v.free >> 30, v.total >> 30); }
-        for x in &g { println!("gpu {} util={:.1} temp={:?} fan={:?} freq={:?} engines={:?} ded={}MB shared={}MB", x.name, x.util, x.temp_c, x.fan_rpm, x.freq_mhz, x.engines, x.dedicated_used >> 20, x.shared_used >> 20); }
+        for x in &g { println!("gpu {} util={:.1} temp={:?} fan={:?} power={:?} freq={:?} engines={:?} ded={}MB shared={}MB", x.name, x.util, x.temp_c, x.fans_rpm, x.power_w, x.freq_mhz, x.engines, x.dedicated_used >> 20, x.shared_used >> 20); }
         println!("top mem {:?}", p.by_mem.iter().map(|r| (&r.name, r.count, r.mem >> 20)).collect::<Vec<_>>());
         println!("system {:?}", { let s = system_info(); (s.hostname, s.os) });
         let mut n = net::NetCollector::new();

@@ -392,6 +392,10 @@ body {
   display: none;
 }
 
+.gauges[hidden] {
+  display: none;
+}
+
 .note {
   margin: 0;
   font-size: 12px;

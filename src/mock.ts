@@ -102,6 +102,7 @@ export function mockState(): { snapshot: Snapshot; history: History } {
       name: "Intel(R) Arc(TM) 140V GPU (16GB)", luid: "0x00000000_0x0000d1a3", util: last(history.gpus[0]),
       engines: [["3D", last(history.gpus[0])], ["VideoDecode", 3.1], ["Copy", 0.4], ["Compute", 0]],
       dedicatedUsed: 0, dedicatedTotal: 128 * MB, sharedUsed: 1.8 * GB, sharedTotal: 15.8 * GB,
+      tempC: 52, fanRpm: null, freqMhz: 1950, powerW: null, fansRpm: [],
     }],
     npu: {
       name: "Intel(R) AI Boost", luid: "0x00000000_0x000121f0", util: last(history.npu), sharedUsed: 1.8 * GB,
@@ -131,6 +132,11 @@ export function mockState(): { snapshot: Snapshot; history: History } {
         { id: "fan-0", label: "CPU", value: 3775 },
         { id: "fan-1", label: "GPU", value: 3761 },
       ],
+      allFans: [
+        { id: "fan-0", label: "CPU", value: 3775 },
+        { id: "fan-1", label: "GPU", value: 3761 },
+      ],
+      barFan: null,
       thermalMode: { current: "Optimized", options: ["Optimized", "Cool", "Quiet", "UltraPerformance"] },
     },
     system: { hostname: "DESKTOP-WSTATS", os: "Windows 11 Pro 25H2 (build 26300)", uptimeSecs: 18 * 86400 + 6 * 3600 + 120 },

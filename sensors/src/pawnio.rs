@@ -8,6 +8,7 @@ use windows::core::{HRESULT, HSTRING, s};
 
 pub const INTEL_MSR: &[u8] = include_bytes!("../pawnio/IntelMSR.bin");
 pub const AMD_FAMILY_17: &[u8] = include_bytes!("../pawnio/AMDFamily17.bin");
+pub const LPC_IO: &[u8] = include_bytes!("../pawnio/LpcIO.bin");
 
 type OpenFn = unsafe extern "system" fn(*mut HANDLE) -> HRESULT;
 type LoadFn = unsafe extern "system" fn(HANDLE, *const u8, usize) -> HRESULT;

@@ -12,7 +12,7 @@ const modeName = (m: string) =>
 const TYPICAL_MAX_RPM = 5000;
 
 export function fansModule(): Module {
-  const rings = headlineRings();
+  const rings = headlineRings(4);
 
   const graphCard = card(t.fanSpeed);
   const graph = historyGraph("fans", "--blue", 2000, (m) => m.fan ?? null);
@@ -39,7 +39,7 @@ export function fansModule(): Module {
       const all = s.sensors.fans;
       const top = Math.max(TYPICAL_MAX_RPM, peak(hist.fan, hist.fan.length));
       rings.set(
-        all.slice(0, 3).map((r) => {
+        all.slice(0, 4).map((r) => {
           const q = rpm(r.value);
           return { label: r.label, q: { v: q.v, u: "" }, frac: r.value / top, color: "--blue" };
         }),

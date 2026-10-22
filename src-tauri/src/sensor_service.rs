@@ -30,6 +30,8 @@ pub struct Status {
     pub pawnio_bundled: bool,
     /// What the service publishes right now.
     pub cpu: bool,
+    /// CPU power (RAPL) read by the service.
+    pub power: bool,
     pub fans: usize,
     pub board: usize,
     /// Why a source is missing, as reported by the service.
@@ -74,8 +76,9 @@ pub fn status() -> Status {
     let mut st = Status { available: binary().is_some(), pawnio_bundled, installed: state.is_some(), running: state == Some(SERVICE_RUNNING.0), outdated, pawnio, ..Default::default() };
     if let Some(p) = service::Reader::open().and_then(|r| r.read()) {
         st.cpu = p.cpu.as_ref().is_some_and(|c| c.package.is_some());
-        st.fans = p.fans.len();
-        st.board = p.thermals.len();
+        st.power = !p.power.is_empty();
+        st.fans = p.fans.len() + p.board.as_ref().map_or(0, |b| b.fans.len());
+        st.board = p.thermals.len() + p.board.as_ref().map_or(0, |b| b.temps.len());
         st.notes = p.notes;
     }
     st

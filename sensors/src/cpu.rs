@@ -57,6 +57,18 @@ impl Reader {
         amd.map_err(|e| format!("IntelMSR: {intel_err}; AMDFamily17: {e}"))
     }
 
+    /// The loaded module, for other readers of the same MSRs (RAPL energy).
+    pub fn module(&self) -> &Module {
+        match self {
+            Reader::Intel { msr, .. } => msr,
+            Reader::Amd { smn, .. } => smn,
+        }
+    }
+
+    pub fn is_amd(&self) -> bool {
+        matches!(self, Reader::Amd { .. })
+    }
+
     pub fn read(&self) -> CpuTemps {
         match self {
             Reader::Intel { msr, tjmax, cpus } => {

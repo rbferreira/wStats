@@ -1,7 +1,7 @@
 [package]
 name = "wstats-sensors"
-version = "0.1.0"
-description = "wStats sensor service: CPU temperatures and laptop fans, read with admin rights"
+version = "0.2.0"
+description = "wStats sensor service: CPU temperatures and power, board and laptop fans, read with admin rights"
 edition = "2024"
 license = "MIT"
 

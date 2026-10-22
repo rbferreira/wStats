@@ -48,15 +48,15 @@ Para quem quer a barra livre, o **modo compacto** põe dois itens por coluna, s�
 | Item | Na barra | No painel |
 |---|---|---|
 | **CPU** | uso com gráfico usuário/sistema | núcleos de desempenho e de eficiência, frequência, processos, GPU, tempo ligado |
-| **GPU** | uso (mesmo critério do Gerenciador de Tarefas) | motores 3D/vídeo/cópia, memória dedicada e compartilhada, temperatura e ventoinha quando o driver informa |
+| **GPU** | uso (mesmo critério do Gerenciador de Tarefas) | motores 3D/vídeo/cópia, memória dedicada e compartilhada, temperatura, ventoinha e clock quando o driver informa, consumo da placa (NVIDIA) |
 | **NPU** | chip que enche com o uso; só aparece em máquinas com NPU (Intel AI Boost, AMD XDNA, Qualcomm Hexagon) | histórico de 24 h, memória, apps que estão usando a NPU |
 | **Memória** | anel de uso | pressão, composição (apps, kernel, cache), processos, arquivo de paginação |
 | **Discos** | espaço usado do C: | volumes, leitura/gravação com histórico, processos que mais leem e gravam |
 | **Rede** | upload e download, na mesma unidade | histórico, Wi-Fi (SSID, sinal, canal, padrão), ping, IP público e local, tráfego da sessão |
 | **Bateria** | carga, em pé; verde carregando, vermelha com 20% ou menos | saúde, ciclos, capacidade, potência de carga ou descarga, tempo restante |
-| **Temperatura** | termômetro que sobe com a temperatura e muda de cor: na cor do tema até 70°, amarelo, laranja e vermelho a partir de 90° | cada núcleo, sensores da placa, histórico de 24 h |
-| **Ventoinhas** | a mais rápida, em RPM | cada ventoinha, histórico, perfil térmico da BIOS (Dell) |
-| **Alimentação** | consumo da CPU em watts | consumo por componente (RAPL), bateria, histórico de 24 h |
+| **Temperatura** | termômetro que sobe com a temperatura e muda de cor: na cor do tema até 70°, amarelo, laranja e vermelho a partir de 90° | cada núcleo, sensores da placa-mãe (desktop) ou da placa (Dell), GPU, histórico de 24 h |
+| **Ventoinhas** | a mais rápida, em RPM | cada ventoinha (conectores da placa-mãe em desktops, notebooks Dell, GPU), histórico, perfil térmico da BIOS (Dell) |
+| **Alimentação** | consumo da CPU em watts | consumo por componente (RAPL), GPU (NVIDIA), bateria, histórico de 24 h |
 
 E também:
 
@@ -83,24 +83,26 @@ E também:
                                                                  │ JSON, só leitura
                                                   ┌──────────────┴───────────────┐
                                                   │ wstats-sensors.exe (serviço) │
-                                                  │ temperatura (PawnIO), Dell   │
+                                                  │ CPU, Super I/O (PawnIO), Dell│
                                                   └──────────────────────────────┘
 ```
 
 - **Integração com a barra.** A barra do Windows 11 é XAML. O wStats usa a API oficial de diagnóstico de XAML (a mesma que o TranslucentTB usa) para carregar um pequeno stub dentro do Explorer. O stub carrega o código de verdade, que insere um elemento no layout da barra e ajusta as margens para os ícones abrirem espaço. O stub nunca muda, então atualizar o wStats troca o código dentro do Explorer **sem reiniciá-lo**. Cada barra (uma por monitor) roda na própria thread, com o próprio timer.
 - **Desenho.** O wStats desenha a faixa com Direct2D e DirectWrite e publica os pixels numa memória compartilhada. O Explorer só exibe a imagem e devolve os cliques.
 - **Plano B.** Se a injeção não for possível, o wStats usa uma janela encaixada no espaço livre da barra, medido com UI Automation, e tenta voltar para o XAML de tempos em tempos.
-- **Sem admin.** O app roda como usuário comum. Só a temperatura da CPU e as ventoinhas precisam de privilégios, e para isso há um serviço separado (abaixo).
+- **Sem admin.** O app roda como usuário comum. Só a temperatura e o consumo da CPU e as ventoinhas precisam de privilégios, e para isso há um serviço separado (abaixo).
 
 ### Serviço de sensores
 
-Temperatura da CPU e ventoinhas de notebook não são acessíveis sem privilégios. Em vez de rodar o wStats inteiro como administrador, um serviço pequeno (`wstats-sensors.exe`, ~220 KB) roda como sistema e só publica leituras:
+Temperatura e consumo da CPU e ventoinhas não são acessíveis sem privilégios. Em vez de rodar o wStats inteiro como administrador, um serviço pequeno (`wstats-sensors.exe`, ~220 KB) roda como sistema e só publica leituras:
 
 - **CPU Intel:** temperatura de cada núcleo e do pacote (MSRs térmicos).
 - **CPU AMD (Zen, família 17h–1Ah):** Tctl e temperatura de cada CCD.
+- **Consumo da CPU (Intel e AMD):** contadores de energia RAPL, quando o próprio Windows não os publica (desktops e toda CPU AMD).
+- **Placas-mãe de desktop:** ventoinhas e temperaturas da placa pelo chip Super I/O: Nuvoton NCT6779D e mais novos (ASUS, ASRock, muitas MSI), NCT6683D/6686D/6687D (MSI recentes) e ITE IT86xx/IT87xx (Gigabyte). Só leitura; o controle das ventoinhas continua com a BIOS. Entradas auxiliares de temperatura que a BIOS não usa ficam ocultas, porque pinos desconectados leem lixo.
 - **Dell:** ventoinhas e sensores da placa pela interface WMI oficial da Dell (DDV), e o perfil térmico da BIOS.
 
-A leitura da CPU usa o [PawnIO](https://github.com/namazso/PawnIO), um driver assinado que só executa módulos assinados. É o mesmo que o LibreHardwareMonitor e o FanControl usam. Nada do wStats roda no kernel.
+A leitura da CPU e do Super I/O usa o [PawnIO](https://github.com/namazso/PawnIO), um driver assinado que só executa módulos assinados. É o mesmo que o LibreHardwareMonitor e o FanControl usam. Nada do wStats roda no kernel, e o acesso ao Super I/O usa a mesma trava dos outros monitores, então eles convivem.
 
 O serviço é ligado em **Configurações › Temperatura** (ou › Ventoinhas) com um clique e um UAC. Ele é copiado para `Program Files` antes de ser registrado e publica os dados numa seção de memória que qualquer usuário lê, mas só o sistema escreve.
 

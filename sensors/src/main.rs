@@ -1,6 +1,7 @@
 //! wstats-sensors: the part of wStats that needs admin rights. Runs as a Windows service
-//! (LocalSystem), reads CPU temperatures (through PawnIO) and Dell fans and board
-//! sensors (through WMI), and publishes them for the wStats app every second.
+//! (LocalSystem), reads CPU temperatures and power (through PawnIO), desktop board fans
+//! and temperatures (the Super I/O chip, through PawnIO) and Dell fans and board sensors
+//! (through WMI), and publishes them for the wStats app every second.
 //!
 //!   wstats-sensors install     install PawnIO if shipped alongside and missing, copy to
 //!                              Program Files, register and start the service
@@ -15,6 +16,8 @@ mod cpu;
 mod dell;
 mod pawnio;
 mod publish;
+mod rapl;
+mod superio;
 
 use serde::Serialize;
 use std::ffi::OsString;
@@ -36,9 +39,9 @@ const DISPLAY_NAME: &str = "wStats Sensors";
 fn description() -> &'static str {
     const LANG_PORTUGUESE: u16 = 0x16;
     if unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() } & 0x3ff == LANG_PORTUGUESE {
-        "Lê temperaturas da CPU e ventoinhas para o wStats."
+        "Lê temperaturas, consumo da CPU e ventoinhas para o wStats."
     } else {
-        "Reads CPU temperatures and fans for wStats."
+        "Reads temperatures, CPU power and fans for wStats."
     }
 }
 const INTERVAL: Duration = Duration::from_secs(1);
@@ -52,6 +55,10 @@ struct Payload<'a> {
     /// Unix time in milliseconds, so readers can tell a stopped service.
     t: u64,
     cpu: Option<cpu::CpuTemps>,
+    /// CPU power by RAPL domain, when Windows does not publish it itself.
+    power: &'a [rapl::Power],
+    /// The motherboard's Super I/O chip (desktops).
+    board: Option<&'a superio::Board>,
     fans: &'a [dell::Fan],
     thermals: &'a [dell::Thermal],
     /// Dell's BIOS thermal mode, when the BIOS offers one.
@@ -62,6 +69,10 @@ struct Payload<'a> {
 
 struct Sampler {
     cpu: Option<cpu::Reader>,
+    rapl: Option<rapl::Rapl>,
+    power: Vec<rapl::Power>,
+    sio: Option<superio::SuperIo>,
+    board: Option<superio::Board>,
     ddv: Option<dell::Ddv>,
     ddv_at: Option<Instant>,
     fans: Vec<dell::Fan>,
@@ -78,10 +89,22 @@ impl Sampler {
             let _ = CoInitializeSecurity(None, -1, None, None, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, None, EOAC_NONE, None);
         }
         let mut notes = Vec::new();
-        let cpu = match pawnio::Lib::load().and_then(|lib| cpu::Reader::open(&lib)) {
+        let lib = pawnio::Lib::load();
+        let cpu = match lib.clone().and_then(|lib| cpu::Reader::open(&lib)) {
             Ok(r) => Some(r),
             Err(e) => {
                 notes.push(format!("cpu: {e}"));
+                None
+            }
+        };
+        let rapl = cpu.as_ref().and_then(rapl::Rapl::open);
+        if cpu.is_some() && rapl.is_none() {
+            notes.push("power: no RAPL counters".into());
+        }
+        let sio = match lib.and_then(|lib| superio::SuperIo::open(&lib)) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                notes.push(format!("superio: {e}"));
                 None
             }
         };
@@ -92,10 +115,19 @@ impl Sampler {
                 None
             }
         };
-        Self { cpu, ddv, ddv_at: None, fans: Vec::new(), thermals: Vec::new(), mode: None, mode_at: None, notes }
+        Self { cpu, rapl, power: Vec::new(), sio, board: None, ddv, ddv_at: None, fans: Vec::new(), thermals: Vec::new(), mode: None, mode_at: None, notes }
     }
 
     fn sample(&mut self) -> Vec<u8> {
+        if let (Some(rapl), Some(cpu)) = (&mut self.rapl, &self.cpu) {
+            self.power = rapl.read(cpu);
+        }
+        if let Some(sio) = &mut self.sio {
+            // Busy bus (another monitor reading it): keep the last reading.
+            if let Some(b) = sio.read() {
+                self.board = Some(b);
+            }
+        }
         if let Some(ddv) = &self.ddv {
             if self.ddv_at.is_none_or(|t| t.elapsed() >= DDV_INTERVAL) {
                 self.ddv_at = Some(Instant::now());
@@ -109,9 +141,11 @@ impl Sampler {
             self.mode = dell::thermal_mode().ok();
         }
         let payload = Payload {
-            v: 1,
+            v: 2,
             t: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
             cpu: self.cpu.as_ref().map(cpu::Reader::read),
+            power: &self.power,
+            board: self.board.as_ref(),
             fans: &self.fans,
             thermals: &self.thermals,
             thermal_mode: self.mode.as_ref(),
@@ -205,7 +239,16 @@ fn install() -> Result<(), String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     if me != target {
         std::fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::copy(&me, &target).map_err(|e| format!("copy to {}: {e}", target.display()))?;
+        // The old process may take a moment to exit after the service reports stopped.
+        let mut copied = std::fs::copy(&me, &target);
+        for _ in 0..20 {
+            if copied.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            copied = std::fs::copy(&me, &target);
+        }
+        copied.map_err(|e| format!("copy to {}: {e}", target.display()))?;
     }
 
     let info = ServiceInfo {
@@ -259,6 +302,9 @@ fn main() {
         Some("uninstall") => uninstall(),
         Some("once") => {
             let mut sampler = Sampler::new();
+            // Power is a rate: it needs two readings.
+            sampler.sample();
+            std::thread::sleep(INTERVAL);
             let json = sampler.sample();
             std::fs::write(std::env::args().nth(2).unwrap_or_else(|| "sensors.json".into()), json).map_err(|e| e.to_string())
         }

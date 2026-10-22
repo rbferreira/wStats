@@ -48,15 +48,15 @@ For a lighter taskbar, the **compact mode** puts two items per column, numbers o
 | Item | In the taskbar | In the panel |
 |---|---|---|
 | **CPU** | usage with a user/system graph | performance and efficiency cores, frequency, processes, GPU, uptime |
-| **GPU** | usage (Task Manager's rule) | 3D/video/copy engines, dedicated and shared memory, temperature and fan when the driver reports them |
+| **GPU** | usage (Task Manager's rule) | 3D/video/copy engines, dedicated and shared memory, temperature, fan and clock when the driver reports them, board power (NVIDIA) |
 | **NPU** | a chip that fills with the load; shown only on machines with an NPU (Intel AI Boost, AMD XDNA, Qualcomm Hexagon) | 24 h history, memory, the apps using the NPU |
 | **Memory** | usage ring | pressure, breakdown (apps, kernel, cache), processes, page file |
 | **Disks** | space used on C: | volumes, read/write with history, the processes reading and writing most |
 | **Network** | upload and download, in one unit | history, Wi-Fi (SSID, signal, channel, standard), ping, public and local IP, session traffic |
 | **Battery** | charge, standing up; green while charging, red at 20% or less | health, cycles, capacity, charge or discharge power, time remaining |
-| **Temperature** | a thermometer that rises and changes colour: the theme colour up to 70°, then yellow, orange, and red from 90° | each core, board sensors, 24 h history |
-| **Fans** | the fastest one, in RPM | each fan, history, the BIOS thermal mode (Dell) |
-| **Power** | CPU power draw in watts | power by component (RAPL), battery, 24 h history |
+| **Temperature** | a thermometer that rises and changes colour: the theme colour up to 70°, then yellow, orange, and red from 90° | each core, motherboard sensors (desktop) or board sensors (Dell), GPU, 24 h history |
+| **Fans** | the fastest one, in RPM | each fan (motherboard headers on desktops, Dell laptops, GPU), history, the BIOS thermal mode (Dell) |
+| **Power** | CPU power draw in watts | power by component (RAPL), GPU (NVIDIA), battery, 24 h history |
 
 Also:
 
@@ -83,24 +83,26 @@ Also:
                                                                  │ JSON, read-only
                                                   ┌──────────────┴───────────────┐
                                                   │ wstats-sensors.exe (service) │
-                                                  │ temperature (PawnIO), Dell   │
+                                                  │ CPU, Super I/O (PawnIO), Dell│
                                                   └──────────────────────────────┘
 ```
 
 - **Taskbar integration.** The Windows 11 taskbar is XAML. wStats uses the official XAML diagnostics API (the one TranslucentTB uses) to load a small stub into Explorer. The stub loads the real code, which inserts an element into the taskbar's layout and adjusts the margins so the icons make room. The stub never changes, so updating wStats swaps the code inside Explorer **without restarting it**. Each taskbar (one per monitor) runs on its own thread, with its own timer.
 - **Drawing.** wStats draws the strip with Direct2D and DirectWrite and publishes the pixels in shared memory. Explorer only shows the image and sends the clicks back.
 - **Fallback.** If injection is not possible, wStats uses a window fitted into the taskbar's free space, measured with UI Automation, and tries to get back to XAML from time to time.
-- **No admin.** The app runs as a normal user. Only CPU temperature and fans need privileges, and a separate service handles them (below).
+- **No admin.** The app runs as a normal user. Only CPU temperature and power, and fans, need privileges, and a separate service handles them (below).
 
 ### Sensor service
 
-CPU temperature and laptop fans cannot be read without privileges. Instead of running all of wStats as administrator, a small service (`wstats-sensors.exe`, ~220 KB) runs as the system and only publishes readings:
+CPU temperature and power, and fans, cannot be read without privileges. Instead of running all of wStats as administrator, a small service (`wstats-sensors.exe`, ~220 KB) runs as the system and only publishes readings:
 
 - **Intel CPUs:** temperature of each core and of the package (thermal MSRs).
 - **AMD CPUs (Zen, family 17h–1Ah):** Tctl and each CCD's temperature.
+- **CPU power (Intel and AMD):** RAPL energy counters, when Windows does not publish them itself (desktops, and every AMD CPU).
+- **Desktop motherboards:** fans and board temperatures from the Super I/O chip: Nuvoton NCT6779D and newer (ASUS, ASRock, many MSI), NCT6683D/6686D/6687D (recent MSI) and ITE IT86xx/IT87xx (Gigabyte). Read only; fan control stays with the BIOS. Auxiliary temperature inputs the BIOS does not use are hidden, since unconnected pins read garbage.
 - **Dell:** fans and board sensors through Dell's official WMI interface (DDV), and the BIOS thermal mode.
 
-CPU reads go through [PawnIO](https://github.com/namazso/PawnIO), a signed driver that only runs signed modules. It is the same one LibreHardwareMonitor and FanControl use. None of wStats runs in the kernel.
+CPU and Super I/O reads go through [PawnIO](https://github.com/namazso/PawnIO), a signed driver that only runs signed modules. It is the same one LibreHardwareMonitor and FanControl use. None of wStats runs in the kernel, and Super I/O access holds the same lock other monitors use, so they can run side by side.
 
 The service is turned on in **Settings › Temperature** (or › Fans) with one click and one UAC prompt. It is copied to `Program Files` before being registered, and it publishes its data in a memory section any user can read but only the system can write.
 

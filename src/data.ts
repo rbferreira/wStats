@@ -42,7 +42,10 @@ function record(h: History, s: Snapshot) {
   if (s.sensors.power.length) push(h.power, s.sensors.power[0].value);
   const temp = s.cpu.tempC ?? (s.sensors.temps.length ? Math.max(...s.sensors.temps.map((r) => r.value)) : null);
   if (temp !== null) push(h.temp, temp);
-  if (s.sensors.fans.length) push(h.fan, Math.max(...s.sensors.fans.map((r) => r.value)));
+  if (s.sensors.fans.length) {
+    const chosen = s.sensors.fans.find((r) => r.id === s.sensors.barFan);
+    push(h.fan, chosen ? chosen.value : Math.max(...s.sensors.fans.map((r) => r.value)));
+  }
   if (s.battery) {
     push(h.battery, s.battery.percent);
     push(h.batteryCharging, s.battery.charging ? 1 : 0);

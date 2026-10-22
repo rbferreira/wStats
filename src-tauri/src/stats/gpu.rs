@@ -2,6 +2,7 @@
 //! process's share per engine type, and report the busiest engine type.
 
 use super::model::Gpu;
+use super::nvml::Nvml;
 use super::pdh::{Counter, Query};
 use crate::win::wide_to_string;
 use std::collections::HashMap;
@@ -9,9 +10,11 @@ use windows::Wdk::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Dxgi::*;
 
 const DXGI_ADAPTER_FLAG_SOFTWARE: u32 = 2;
+const VENDOR_NVIDIA: u32 = 0x10DE;
 
 struct Adapter {
     name: String,
+    vendor: u32,
     luid: String,
     /// Kernel handle for the D3DKMT perf queries (temperature, fan, clock); 0 if unavailable.
     kmt: u32,
@@ -24,15 +27,19 @@ pub struct GpuCollector {
     dedicated: Option<Counter>,
     shared: Option<Counter>,
     adapters: Vec<Adapter>,
+    /// NVIDIA's management library, when an NVIDIA GPU is present.
+    nvml: Option<Nvml>,
 }
 
 impl GpuCollector {
     pub fn new(q: &Query) -> Self {
+        let adapters = list_adapters();
         Self {
             engines: q.add(r"\GPU Engine(*)\Utilization Percentage"),
             dedicated: q.add(r"\GPU Adapter Memory(*)\Dedicated Usage"),
             shared: q.add(r"\GPU Adapter Memory(*)\Shared Usage"),
-            adapters: list_adapters(),
+            nvml: adapters.iter().any(|a| a.vendor == VENDOR_NVIDIA).then(Nvml::open).flatten(),
+            adapters,
         }
     }
 
@@ -61,18 +68,23 @@ impl GpuCollector {
         let dedicated = mem(self.dedicated);
         let shared = mem(self.shared);
 
+        // NVML lists NVIDIA GPUs in the driver's order, as DXGI does.
+        let mut nvidia = self.nvml.as_ref().map(Nvml::sample).unwrap_or_default().into_iter();
+        let nv: Vec<_> = self.adapters.iter().map(|a| if a.vendor == VENDOR_NVIDIA { nvidia.next() } else { None }).collect();
+
         // DXGI can list one GPU under a second LUID (e.g. for an indirect display); only the
         // LUID that owns engine counters is the real one.
         self.adapters
             .iter()
-            .filter(|a| per.contains_key(&a.luid))
-            .map(|a| {
+            .zip(nv)
+            .filter(|(a, _)| per.contains_key(&a.luid))
+            .map(|(a, nv)| {
                 let mut engines: Vec<(String, f32)> = per
                     .get(&a.luid)
                     .map(|m| m.iter().map(|(k, v)| (k.clone(), v.min(100.0) as f32)).collect())
                     .unwrap_or_default();
                 engines.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
-                Gpu {
+                let mut g = Gpu {
                     name: a.name.clone(),
                     luid: a.luid.clone(),
                     util: engines.first().map(|e| e.1).unwrap_or(0.0),
@@ -82,7 +94,14 @@ impl GpuCollector {
                     shared_used: shared.get(&a.luid).copied().unwrap_or(0),
                     shared_total: a.shared_total,
                     ..kernel_perf(a.kmt)
+                };
+                if let Some(r) = nv {
+                    g.power_w = r.watts;
+                    g.temp_c = g.temp_c.or(r.temp_c);
+                    g.fan_rpm = g.fan_rpm.or(r.fans_rpm.iter().max().copied());
+                    g.fans_rpm = r.fans_rpm;
                 }
+                g
             })
             .collect()
     }
@@ -144,6 +163,7 @@ fn list_adapters() -> Vec<Adapter> {
         let kmt = if unsafe { D3DKMTOpenAdapterFromLuid(&mut open) }.is_ok() { open.hAdapter } else { 0 };
         out.push(Adapter {
             name: wide_to_string(&d.Description),
+            vendor: d.VendorId,
             luid,
             kmt,
             dedicated_total: d.DedicatedVideoMemory as u64,

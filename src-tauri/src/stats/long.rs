@@ -93,7 +93,7 @@ impl LongHistory {
             a.tc_n += 1;
             a.sum.tc = Some(a.sum.tc.unwrap_or(0.0) + t);
         }
-        if let Some(f) = s.sensors.fastest_fan() {
+        if let Some(f) = s.sensors.bar_fan_rpm() {
             a.fan_n += 1;
             a.sum.fan = Some(a.sum.fan.unwrap_or(0.0) + f);
         }

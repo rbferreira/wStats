@@ -39,6 +39,8 @@ const DEFAULTS: Settings = {
   compact: false,
   compactTag: "icon",
   side: "left",
+  hiddenFans: [],
+  barFan: null,
 };
 
 const PALETTE = ["#3478F6", "#78C04F", "#F5C542", "#EF8240", "#EF5350", "#E85D9E", "#A06CF0", "#5AC8E8"];
@@ -90,6 +92,7 @@ interface SensorStatus {
   pawnio: boolean;
   pawnioBundled: boolean;
   cpu: boolean;
+  power: boolean;
   fans: number;
   board: number;
   notes: string[];
@@ -443,6 +446,7 @@ function modulePage(id: ModuleId) {
       h("div", "field row", h("div", "field-label", t.set.showOnTaskbar), toggle(on, (v) => update((s) => (s.modules = v ? [...s.modules, id] : s.modules.filter((x) => x !== id))))),
       on ? field(t.set.positionOf(index + 1, settings.modules.length), h("div", "btn-row", left, right)) : h("p", "field-hint", t.set.turnOnForPosition),
     ),
+    ...(id === "fans" ? [fanChoiceGroup()] : []),
     ...(SERVICE_PAGES.includes(id) ? [sensorServiceGroup()] : []),
     group(t.set.colours, h("p", "prose", t.set.coloursProse)),
   );
@@ -450,7 +454,7 @@ function modulePage(id: ModuleId) {
 
 async function checkSensors() {
   if (!inTauri) {
-    sensorStatus = { available: true, installed: false, running: false, outdated: false, pawnio: true, pawnioBundled: true, cpu: false, fans: 0, board: 0, notes: [] };
+    sensorStatus = { available: true, installed: false, running: false, outdated: false, pawnio: true, pawnioBundled: true, cpu: false, power: false, fans: 0, board: 0, notes: [] };
   } else {
     sensorStatus = await invoke<SensorStatus>("sensor_status").catch(() => null);
   }
@@ -471,6 +475,35 @@ async function toggleSensorService(install: boolean) {
   setTimeout(checkSensors, install ? 1500 : 0);
 }
 
+/** Which fans show, and which one the taskbar shows. */
+function fanChoiceGroup() {
+  const all = state?.snapshot.sensors.allFans ?? [];
+  if (!all.length) return group(t.set.fansShown, h("p", "field-hint", t.set.noFansYet));
+  const hidden = new Set(settings.hiddenFans ?? []);
+  const rows = all.map((r) =>
+    h(
+      "div",
+      "field row",
+      h("div", "field-label", r.label),
+      toggle(!hidden.has(r.id), (v) => update((s) => (s.hiddenFans = v ? (s.hiddenFans ?? []).filter((x) => x !== r.id) : [...(s.hiddenFans ?? []), r.id])), r.label),
+    ),
+  );
+
+  const sel = h("select", "select");
+  const fastest = h("option", "", t.set.fastestFan);
+  fastest.value = "";
+  sel.append(fastest);
+  for (const r of all.filter((r) => !hidden.has(r.id))) {
+    const o = h("option", "", r.label);
+    o.value = r.id;
+    sel.append(o);
+  }
+  sel.value = settings.barFan && !hidden.has(settings.barFan) && all.some((r) => r.id === settings.barFan) ? settings.barFan : "";
+  sel.onchange = () => update((s) => (s.barFan = sel.value || null));
+
+  return group(t.set.fansShown, h("p", "field-hint", t.set.fansShownHint), ...rows, field(t.set.barFan, sel));
+}
+
 /** Status of the background service that reads CPU temperatures and fans. */
 function sensorServiceGroup() {
   const st = sensorStatus;
@@ -481,6 +514,7 @@ function sensorServiceGroup() {
   const dot = (on: boolean) => h("span", `status-dot${on ? " on" : ""}`);
   const found: string[] = [];
   if (st.cpu) found.push(t.set.cpuTemperature);
+  if (st.power) found.push(t.set.cpuPower);
   if (st.board) found.push(t.set.boardSensors(st.board));
   if (st.fans) found.push(t.set.fanCount(st.fans));
 
@@ -571,8 +605,15 @@ async function boot() {
   render();
   let ticks = 0;
   let hadNpu = false;
+  let fanIds = "";
   await connect((s) => {
     state = s;
+    // The fan list in Settings follows the fans found.
+    const ids = s.snapshot.sensors.allFans.map((r) => `${r.id}:${r.label}`).join("|");
+    if (ids !== fanIds) {
+      fanIds = ids;
+      if (page === "fans") render();
+    }
     // The NPU page and row appear once the first sample says there is one.
     if (!!s.snapshot.npu !== hadNpu) {
       hadNpu = !hadNpu;

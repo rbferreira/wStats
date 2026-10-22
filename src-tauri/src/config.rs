@@ -126,6 +126,10 @@ pub struct Settings {
     pub side: Side,
     /// The NPU item was added for this machine once; turning it off afterwards sticks.
     pub npu_offered: bool,
+    /// Fans (reading ids) left out of the panel and the taskbar.
+    pub hidden_fans: Vec<String>,
+    /// The fan the taskbar shows; `None` = the fastest.
+    pub bar_fan: Option<String>,
 }
 
 /// The two colours every chart is built from, as `#RRGGBB`.
@@ -160,6 +164,8 @@ impl Default for Settings {
             compact_tag: Tag::Icon,
             side: Side::Left,
             npu_offered: false,
+            hidden_fans: Vec::new(),
+            bar_fan: None,
         }
     }
 }

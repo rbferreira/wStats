@@ -173,6 +173,10 @@ pub struct Gpu {
     pub fan_rpm: Option<u32>,
     /// Current 3D engine clock.
     pub freq_mhz: Option<f32>,
+    /// Board power (NVIDIA, through NVML).
+    pub power_w: Option<f32>,
+    /// Each fan, in RPM (NVIDIA, through NVML); 0 while stopped.
+    pub fans_rpm: Vec<u32>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -221,8 +225,12 @@ pub struct Sensors {
     pub power: Vec<Reading>,
     /// Degrees Celsius.
     pub temps: Vec<Reading>,
-    /// RPM.
+    /// RPM, minus the fans hidden in Settings.
     pub fans: Vec<Reading>,
+    /// Every fan found, hidden ones included (for Settings).
+    pub all_fans: Vec<Reading>,
+    /// The fan the taskbar shows, chosen in Settings; `None` = the fastest.
+    pub bar_fan: Option<String>,
     /// The firmware's thermal mode (Dell), when the sensor service can read it.
     pub thermal_mode: Option<ThermalMode>,
 }
@@ -243,17 +251,28 @@ pub struct Reading {
 
 impl Sensors {
     /// The headline power figure: the whole platform if reported, else the CPU package.
+    /// GPU readings follow the CPU's and count only when nothing else is reported.
     pub fn package_watts(&self) -> Option<f32> {
-        self.power.first().map(|r| r.value)
+        self.power.iter().find(|r| r.id.starts_with("RAPL")).or(self.power.first()).map(|r| r.value)
     }
 
     pub fn hottest(&self) -> Option<f32> {
         self.temps.iter().map(|r| r.value).fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
     }
 
-    /// The fastest fan, in RPM.
-    pub fn fastest_fan(&self) -> Option<f32> {
+    /// The taskbar's fan: the one chosen in Settings, else the fastest, in RPM.
+    pub fn bar_fan_rpm(&self) -> Option<f32> {
+        if let Some(r) = self.bar_fan.as_ref().and_then(|id| self.fans.iter().find(|r| &r.id == id)) {
+            return Some(r.value);
+        }
         self.fans.iter().map(|r| r.value).fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
+    }
+
+    /// Leaves out the hidden fans and remembers the taskbar's choice.
+    pub fn apply_fan_prefs(&mut self, hidden: &[String], bar: Option<&String>) {
+        self.all_fans = self.fans.clone();
+        self.fans.retain(|r| !hidden.contains(&r.id));
+        self.bar_fan = bar.filter(|id| self.fans.iter().any(|r| &r.id == *id)).cloned();
     }
 }
 
@@ -396,7 +415,7 @@ impl History {
         if let Some(t) = s.headline_temp() {
             self.temp.push(t);
         }
-        if let Some(f) = s.sensors.fastest_fan() {
+        if let Some(f) = s.sensors.bar_fan_rpm() {
             self.fan.push(f);
         }
         if let Some(b) = &s.battery {

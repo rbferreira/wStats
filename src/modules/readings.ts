@@ -62,16 +62,24 @@ export interface Headline {
   color: string;
 }
 
-/** Up to three ring gauges at the top of the popup. */
-export function headlineRings() {
+/** Ring gauges at the top of the popup: up to three, or four smaller ones when `max` is 4. */
+export function headlineRings(max: 3 | 4 = 3) {
   const c = card(undefined, "rings-card");
-  const gauges = [gauge("", "md"), gauge("", "md"), gauge("", "md")];
-  c.el.append(h("div", "gauges gauges-3", ...gauges.map((g) => g.el)));
+  const big = [gauge("", "md"), gauge("", "md"), gauge("", "md")];
+  const bigRow = h("div", "gauges gauges-3", ...big.map((g) => g.el));
+  const small = max === 4 ? [gauge("", "sm"), gauge("", "sm"), gauge("", "sm"), gauge("", "sm")] : [];
+  const smallRow = h("div", "gauges gauges-4", ...small.map((g) => g.el));
+  c.el.append(bigRow, smallRow);
   return {
     el: c.el,
     set(items: Headline[]) {
+      items = items.slice(0, max);
       c.el.hidden = items.length === 0;
-      gauges.forEach((g, i) => {
+      // Four don't fit at full size: switch to the small row.
+      const four = items.length === 4;
+      bigRow.hidden = four;
+      smallRow.hidden = !four;
+      (four ? small : big).forEach((g, i) => {
         const x = items[i];
         g.el.hidden = !x;
         if (!x) return;
