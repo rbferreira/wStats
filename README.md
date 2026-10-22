@@ -69,7 +69,7 @@ Also:
 - **English and Portuguese**, following the Windows language or chosen in Settings; the installer is bilingual too.
 - **Save memory**: unloads the panels after a minute unused, and wStats drops to about 18 MB (with the panels always ready it sits around 110 MB, almost all of it WebView2).
 - **Start with Windows**, with a menu in the tray and on the taskbar's right click.
-- **New versions**: once a day wStats asks GitHub for the latest release and, when there is one, says so (a notification, Settings › About and both menus). Updating downloads the setup, checks it against the SHA-256 GitHub publishes and runs it. The check can be turned off; besides the public IP shown in the Network panel, it is wStats' only request to the outside.
+- **New versions**: once a day wStats asks GitHub for the latest release and, when there is one, says so (a notification, Settings › About and both menus). Updating opens the setup's download in the browser. The check can be turned off; besides the public IP shown in the Network panel, it is wStats' only request to the outside.
 
 ## How it works
 

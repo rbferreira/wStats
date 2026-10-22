@@ -69,7 +69,7 @@ E também:
 - **Português e inglês**, seguindo o idioma do Windows ou escolhido nas Configurações; o instalador também é bilíngue.
 - **Economizar memória**: descarrega os painéis depois de 1 minuto sem uso, e o wStats cai para cerca de 18 MB (com os painéis sempre prontos, fica em torno de 110 MB, quase tudo do WebView2).
 - **Iniciar com o Windows**, menu na bandeja e no clique direito da barra.
-- **Versões novas**: uma vez por dia o wStats pergunta ao GitHub qual é o último release e, se houver um mais novo, avisa (notificação, Configurações › Sobre e os dois menus). Atualizar baixa o instalador, confere o SHA-256 que o GitHub publica e o executa. A verificação pode ser desligada; além do IP público mostrado no painel de Rede, é a única consulta do wStats para fora.
+- **Versões novas**: uma vez por dia o wStats pergunta ao GitHub qual é o último release e, se houver um mais novo, avisa (notificação, Configurações › Sobre e os dois menus). Atualizar abre o download do instalador no navegador. A verificação pode ser desligada; além do IP público mostrado no painel de Rede, é a única consulta do wStats para fora.
 
 ## Como funciona
 

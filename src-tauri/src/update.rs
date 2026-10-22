@@ -1,8 +1,11 @@
 //! New releases. A minute after starting, and then once a day, wStats asks GitHub for the
 //! latest release (Settings › About turns this off). A newer one shows in Settings and in
-//! both menus. Installing it downloads the setup attached to the release, checks it
-//! against the SHA-256 GitHub publishes for it, and runs it: the setup asks for UAC once
-//! and updates the sensor service as well.
+//! both menus, which open its setup's download in the browser.
+//!
+//! wStats does not download and run the setup itself: an unsigned program that fetches an
+//! executable and starts it is what Defender's heuristics call a downloader, and the
+//! installer carrying that code was flagged (Trojan:Win32/Bearfoos.A!ml). Through the
+//! browser the download gets the usual SmartScreen and Defender checks instead.
 
 use crate::lang::tr;
 use parking_lot::Mutex;
@@ -11,20 +14,18 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use windows::Win32::Foundation::ERROR_CANCELLED;
 use windows::Win32::Networking::WinHttp::*;
-use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
-use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
 const LATEST: &str = "https://api.github.com/repos/rbferreira/wStats/releases/latest";
-/// Where a release's setup may come from (GitHub redirects the download to its storage).
+/// Where a release's setup is downloaded from.
 const DOWNLOADS: &str = "https://github.com/rbferreira/wStats/releases/download/";
+const RELEASES: &str = "https://github.com/rbferreira/wStats/releases/";
 const FIRST_CHECK: Duration = Duration::from_secs(60);
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
-/// The setup is about 5 MB; the API answer, a few KB.
-const MAX_SETUP: usize = 64 << 20;
+/// The API's answer is a few KB.
 const MAX_JSON: usize = 1 << 20;
 
 #[derive(Serialize, Clone, Default, Debug)]
@@ -37,17 +38,9 @@ pub struct Status {
     pub url: Option<String>,
     /// Unix seconds of the last check that got an answer.
     pub checked_at: Option<u64>,
-    /// A check or a download is running.
+    /// A check is running.
     pub busy: bool,
     pub error: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct Setup {
-    url: String,
-    name: String,
-    size: u64,
-    sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -62,15 +55,12 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
-    size: u64,
-    /// `sha256:<hex>`, published by GitHub for every asset.
-    #[serde(default)]
-    digest: Option<String>,
 }
 
 pub struct Updater {
     status: Mutex<Status>,
-    setup: Mutex<Option<Setup>>,
+    /// The new release's setup, to download.
+    setup: Mutex<Option<String>>,
     /// Settings › About: look for new releases.
     pub enabled: AtomicBool,
     on_change: Box<dyn Fn(&Status) + Send + Sync>,
@@ -147,80 +137,43 @@ impl Updater {
         });
     }
 
-    /// Opens the new release's page (its notes) in the browser.
-    pub fn open_notes(&self) {
-        let Some(url) = self.status.lock().url.clone() else { return };
-        unsafe {
-            windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    /// Opens the new release's setup download in the browser; its page when the release
+    /// has no setup attached.
+    pub fn download(&self) {
+        let url = self.setup.lock().clone().or_else(|| self.status.lock().url.clone());
+        if let Some(url) = url {
+            open(&url);
         }
     }
 
-    /// Downloads and checks the new release's setup, then runs it. Once this returns Ok
-    /// the setup is running (UAC accepted) and wStats should quit so it can be replaced.
-    pub fn install(&self) -> Result<(), String> {
-        let setup = self.setup.lock().clone().ok_or(tr("a versão nova não traz o instalador", "the new version has no setup attached"))?;
-        self.update(|s| {
-            s.busy = true;
-            s.error = None;
-        });
-        let result = download(&setup).and_then(|path| run(&path));
-        self.update(|s| {
-            s.busy = false;
-            s.error = result.as_ref().err().cloned();
-        });
-        result
+    /// Opens the new release's page (its notes) in the browser.
+    pub fn open_notes(&self) {
+        if let Some(url) = self.status.lock().url.clone() {
+            open(&url);
+        }
     }
 }
 
-/// The latest release, and its setup when it ships one with a digest.
-fn latest() -> Result<(Release, Option<Setup>), String> {
+/// Opens a GitHub link of this project in the browser; anything else is ignored.
+fn open(url: &str) {
+    if !url.starts_with(RELEASES) {
+        return;
+    }
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
+/// The latest release, and its setup's download link when it ships one.
+fn latest() -> Result<(Release, Option<String>), String> {
     let body = get(LATEST, "application/vnd.github+json", MAX_JSON)?;
     let release: Release = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    let setup = release.assets.iter().find_map(|a| {
-        let sha256 = a.digest.as_deref()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-        let ours = a.name.starts_with("wStats_") && a.name.ends_with("_x64-setup.exe") && a.browser_download_url.starts_with(DOWNLOADS);
-        ours.then(|| Setup { url: a.browser_download_url.clone(), name: a.name.clone(), size: a.size, sha256 })
-    });
+    let setup = release
+        .assets
+        .iter()
+        .find(|a| a.name.starts_with("wStats_") && a.name.ends_with("_x64-setup.exe") && a.browser_download_url.starts_with(DOWNLOADS))
+        .map(|a| a.browser_download_url.clone());
     Ok((release, setup))
-}
-
-/// Downloads the setup to %TEMP% and checks its size and SHA-256.
-fn download(setup: &Setup) -> Result<std::path::PathBuf, String> {
-    let bytes = get(&setup.url, "application/octet-stream", MAX_SETUP)?;
-    if bytes.len() as u64 != setup.size || sha256_hex(&bytes)? != setup.sha256 {
-        return Err(tr("o arquivo baixado não confere com o publicado", "the download does not match the published file").into());
-    }
-    let dir = std::env::temp_dir().join("wStats-update");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // A plain file name from the API, and checked above, but keep it to a file name.
-    let name = std::path::Path::new(&setup.name).file_name().ok_or("bad file name")?;
-    let path = dir.join(name);
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(path)
-}
-
-/// Starts the setup. It is a per-machine installer, so Windows asks for UAC here; a
-/// refusal comes back as an error and wStats keeps running.
-fn run(path: &std::path::Path) -> Result<(), String> {
-    let file = HSTRING::from(path.as_os_str());
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOASYNC,
-        lpVerb: w!("open"),
-        lpFile: PCWSTR(file.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| {
-        if e.code() == ERROR_CANCELLED.to_hresult() { tr("cancelado no UAC", "cancelled at the UAC prompt").into() } else { e.message() }
-    })
-}
-
-fn sha256_hex(bytes: &[u8]) -> Result<String, String> {
-    let mut out = [0u8; 32];
-    let status = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, bytes, &mut out) };
-    status.ok().map_err(|e| e.message())?;
-    Ok(out.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// `a` newer than `b`, both `major.minor.patch` (a `-suffix` is ignored).
@@ -258,7 +211,7 @@ fn get(url: &str, accept: &str, limit: usize) -> Result<Vec<u8>, String> {
     unsafe {
         let session = Handle::new(WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0))?;
         let _ = WinHttpSetTimeouts(session.0, 15_000, 15_000, 15_000, 30_000);
-        let connect = Handle::new(WinHttpConnect(session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT as u16, 0))?;
+        let connect = Handle::new(WinHttpConnect(session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0))?;
         let request = Handle::new(WinHttpOpenRequest(connect.0, w!("GET"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE))?;
         let headers: Vec<u16> = format!("Accept: {accept}\r\n").encode_utf16().collect();
         WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).map_err(|e| e.message())?;
@@ -301,24 +254,14 @@ mod tests {
         assert!(!newer_than("garbage", "0.3.0"));
     }
 
-    #[test]
-    fn hashes() {
-        assert_eq!(sha256_hex(b"abc").unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    }
-
     /// Talks to GitHub: run by hand (`cargo test -- --ignored`).
     #[test]
     #[ignore]
     fn reads_the_latest_release() {
         let (release, setup) = latest().expect("latest release");
         assert!(release.tag_name.starts_with('v'), "{}", release.tag_name);
-        let setup = setup.expect("setup asset with a digest");
-        assert_eq!(setup.sha256.len(), 64);
-        let path = download(&setup).expect("download matches its digest");
-        println!("{} {} {} bytes -> {}", release.tag_name, setup.name, setup.size, path.display());
-        let _ = std::fs::remove_file(path);
-        // A digest that does not match is refused.
-        let wrong = Setup { sha256: "0".repeat(64), ..setup };
-        assert!(download(&wrong).is_err());
+        let setup = setup.expect("a setup attached");
+        assert!(setup.starts_with(DOWNLOADS) && setup.ends_with("_x64-setup.exe"), "{setup}");
+        println!("{} {setup}", release.tag_name);
     }
 }

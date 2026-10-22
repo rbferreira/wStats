@@ -124,20 +124,15 @@ fn open_release_notes(app: tauri::State<'_, Arc<App>>) {
 }
 
 #[tauri::command]
-fn install_update(handle: AppHandle) {
-    start_update(&handle);
+fn download_update(app: tauri::State<'_, Arc<App>>) {
+    app.updater.download();
 }
 
-/// Downloads and runs the new release's setup, then quits so it can replace wStats.
-/// Errors (UAC refused, download failed) land in the update status Settings shows.
+/// Opens the new release's setup download in the browser.
 fn start_update(handle: &AppHandle) {
-    let Some(app) = handle.try_state::<Arc<App>>().map(|a| a.inner().clone()) else { return };
-    let handle = handle.clone();
-    let _ = std::thread::Builder::new().name("update-install".into()).spawn(move || {
-        if app.updater.install().is_ok() {
-            handle.exit(0);
-        }
-    });
+    if let Some(app) = handle.try_state::<Arc<App>>() {
+        app.updater.download();
+    }
 }
 
 /// The update status changed: tell Settings, offer it in the menus, and announce a new
@@ -151,7 +146,7 @@ fn update_changed(handle: &AppHandle, st: &update::Status) {
     if app.settings.read().update_notified.as_ref() == Some(version) {
         return;
     }
-    let body = format!("{} {version}. {}", lang::tr("Nova versão do wStats:", "New wStats version:"), lang::tr("Atualize pelo menu ou em Configurações.", "Update from the menu or in Settings."));
+    let body = format!("{} {version}. {}", lang::tr("Nova versão do wStats:", "New wStats version:"), lang::tr("Baixe pelo menu ou em Configurações › Sobre.", "Download it from the menu or in Settings › About."));
     if let Err(e) = handle.notification().builder().title("wStats").body(body).show() {
         log::warn!("update notification: {e}");
     }
@@ -160,9 +155,9 @@ fn update_changed(handle: &AppHandle, st: &update::Status) {
     let _ = app.save(s, handle);
 }
 
-/// "Update to 0.4.0…", while a newer release is known.
+/// "Download wStats 0.4.0…", while a newer release is known.
 fn update_label(app: &App) -> Option<String> {
-    app.updater.status().latest.map(|v| format!("{} {v}…", lang::tr("Atualizar para a versão", "Update to version")))
+    app.updater.status().latest.map(|v| format!("{} {v}…", lang::tr("Baixar o wStats", "Download wStats")))
 }
 
 #[tauri::command]
@@ -345,7 +340,7 @@ pub fn run() {
             open_settings,
             update_status,
             check_update,
-            install_update,
+            download_update,
             open_release_notes
         ])
         .setup(|tauri_app| {

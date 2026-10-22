@@ -563,15 +563,14 @@ function updateGroup() {
   const u = updateStatus;
   const dot = (on: boolean) => h("span", `status-dot${on ? " on" : ""}`);
   const lines: Node[] = [];
-  if (u?.busy) lines.push(h("p", "status-line", dot(false), u.latest ? t.set.downloading : t.set.checkingUpdates));
+  if (u?.busy) lines.push(h("p", "status-line", dot(false), t.set.checkingUpdates));
   else if (u?.latest) lines.push(h("p", "status-line", dot(true), t.set.newVersion(u.latest)));
   else if (u?.checkedAt) lines.push(h("p", "status-line", dot(false), t.set.upToDate));
 
   const buttons: HTMLElement[] = [];
   if (u?.latest) {
     const install = h("button", "btn", t.set.updateNow);
-    install.disabled = u.busy;
-    install.onclick = () => invoke("install_update").catch(console.error);
+    install.onclick = () => invoke("download_update").catch(console.error);
     const notes = h("button", "btn", t.set.releaseNotes);
     notes.onclick = () => invoke("open_release_notes").catch(console.error);
     buttons.push(install, notes);
