@@ -173,34 +173,51 @@ impl ProcCollector {
         let secs = self.last.map(|t| (now - t).as_secs_f64()).unwrap_or(0.0);
         self.last = Some(now);
 
-        // Group by executable so Chrome's 30 renderers read as one row.
-        let mut groups: HashMap<String, ProcRow> = HashMap::new();
-        let mut seen = HashMap::with_capacity(list.len());
+        // Every process's executable first: a WebView2 process is counted under the app
+        // that hosts it, which needs the host's.
+        let mut procs = Vec::with_capacity(list.len());
         for (p, name) in list {
             let pid = p.unique_process_id as u32;
             if pid == 0 {
                 continue; // System Idle Process
             }
             let name = if name.is_empty() { "System".to_string() } else { name };
-            let key: Key = (pid, p.create_time);
-            let cpu = (p.user_time + p.kernel_time) as u64;
-            let (read, write) = (p.read_transfer_count as u64, p.write_transfer_count as u64);
-            let prev = self.seen.remove(&key);
+            let prev = self.seen.remove(&(pid, p.create_time));
             let exe = match &prev {
                 Some(s) => s.exe.clone(),
                 None => self.exes.path(pid),
             };
+            procs.push((p, name, exe, prev));
+        }
+        let nodes: Vec<Node> = procs
+            .iter()
+            .map(|(p, name, ..)| Node {
+                pid: p.unique_process_id as u32,
+                parent: p.inherited_from_unique_process_id as u32,
+                created: p.create_time,
+                webview: name.eq_ignore_ascii_case(WEBVIEW),
+            })
+            .collect();
+        let by_pid: HashMap<u32, usize> = nodes.iter().enumerate().map(|(i, n)| (n.pid, i)).collect();
 
-            let group = if exe.is_empty() { name.to_lowercase() } else { exe.to_lowercase() };
-            let label = self.exes.label(&exe, &name);
+        // Group by executable so Chrome's 30 renderers read as one row.
+        let mut groups: HashMap<String, ProcRow> = HashMap::new();
+        let mut seen = HashMap::with_capacity(procs.len());
+        for (i, (p, _, exe, prev)) in procs.iter().enumerate() {
+            let key: Key = (p.unique_process_id as u32, p.create_time);
+            let cpu = (p.user_time + p.kernel_time) as u64;
+            let (read, write) = (p.read_transfer_count as u64, p.write_transfer_count as u64);
+
+            let (_, owner_name, owner_exe, _) = &procs[webview_host(&nodes, &by_pid, i).unwrap_or(i)];
+            let group = if owner_exe.is_empty() { owner_name.to_lowercase() } else { owner_exe.to_lowercase() };
             let row = groups.entry(group).or_insert_with(|| ProcRow {
-                name: label,
-                exe: exe.clone(),
+                name: self.exes.label(owner_exe, owner_name),
+                exe: owner_exe.clone(),
                 ..Default::default()
             });
             row.count += 1;
             row.mem += p.working_set_size as u64;
-            if let Some(s) = &prev
+            if let Some(s) = prev
                 && secs > 0.0
             {
                 // Process times are in 100 ns units.
@@ -208,7 +225,7 @@ impl ProcCollector {
                 row.disk_read += read.saturating_sub(s.read) as f64 / secs;
                 row.disk_write += write.saturating_sub(s.write) as f64 / secs;
             }
-            seen.insert(key, Seen { exe, cpu, read, write });
+            seen.insert(key, Seen { exe: exe.clone(), cpu, read, write });
         }
         // Whatever was not seen this time has exited.
         self.seen = seen;
@@ -226,6 +243,39 @@ impl ProcCollector {
             by_disk: top(|r| r.disk_read + r.disk_write),
         }
     }
+}
+
+const WEBVIEW: &str = "msedgewebview2.exe";
+
+/// What `webview_host` needs to know about a process.
+struct Node {
+    pid: u32,
+    parent: u32,
+    created: i64,
+    webview: bool,
+}
+
+/// The app a WebView2 process works for: its first ancestor that is not WebView2, the
+/// way Task Manager files it under WhatsApp instead of "Microsoft Edge WebView2". `None`
+/// for any other process, and when the host has exited (the process then keeps a row of
+/// its own). A parent started after its child is a reused id, not the parent.
+fn webview_host(nodes: &[Node], by_pid: &HashMap<u32, usize>, i: usize) -> Option<usize> {
+    if !nodes[i].webview {
+        return None;
+    }
+    let mut cur = i;
+    // The chain is short (renderer -> browser -> app); the bound guards against loops.
+    for _ in 0..8 {
+        let parent = *by_pid.get(&nodes[cur].parent)?;
+        if parent == cur || nodes[parent].created > nodes[cur].created {
+            return None;
+        }
+        if !nodes[parent].webview {
+            return Some(parent);
+        }
+        cur = parent;
+    }
+    None
 }
 
 unsafe fn unicode(s: &UnicodeString) -> String {
@@ -314,6 +364,28 @@ mod tests {
         assert_eq!(to_dos(&drives, r"\Device\HarddiskVolume3\Windows\explorer.exe").as_deref(), Some(r"C:\Windows\explorer.exe"));
         assert_eq!(to_dos(&drives, r"\Device\HarddiskVolume31\x.exe"), None);
         assert_eq!(to_dos(&drives, r"\Device\Mup\server\share\x.exe").as_deref(), Some(r"\\server\share\x.exe"));
+    }
+
+    #[test]
+    fn webview_counts_under_its_host() {
+        let node = |pid, parent, created, webview| Node { pid, parent, created, webview };
+        // app 10 -> browser 20 -> renderer 30; 40 is orphaned; 50's "parent" id was reused
+        // by a process started after it.
+        let nodes = vec![
+            node(10, 1, 100, false),
+            node(20, 10, 200, true),
+            node(30, 20, 300, true),
+            node(40, 99, 400, true),
+            node(60, 1, 900, false),
+            node(50, 60, 500, true),
+        ];
+        let by_pid: HashMap<u32, usize> = nodes.iter().enumerate().map(|(i, n)| (n.pid, i)).collect();
+        let host = |i| webview_host(&nodes, &by_pid, i);
+        assert_eq!(host(0), None, "the app itself");
+        assert_eq!(host(1), Some(0), "browser process");
+        assert_eq!(host(2), Some(0), "renderer, two levels down");
+        assert_eq!(host(3), None, "host exited");
+        assert_eq!(host(5), None, "parent id reused");
     }
 
     /// The point of reading through ntdll: system processes an unelevated app cannot
