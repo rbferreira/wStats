@@ -1,6 +1,6 @@
 [package]
 name = "wstats"
-version = "0.3.0"
+version = "0.3.1"
 description = "System monitor that lives in the Windows taskbar"
 authors = ["Rafael Ferreira"]
 license = "MIT"
