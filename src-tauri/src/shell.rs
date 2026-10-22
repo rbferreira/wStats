@@ -32,6 +32,10 @@ pub fn icon_data_url(path: &str) -> Option<String> {
 }
 
 fn load_icon(path: &str) -> Option<Vec<u8>> {
+    // Store apps' executables carry no icon of their own (Explorer shows a blank window).
+    if let Some(png) = package_of(path).and_then(|p| p.logo()) {
+        return Some(png);
+    }
     // Icon handlers are shell extensions; they need COM on whatever thread asks.
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
     let mut info = SHFILEINFOW::default();
@@ -160,9 +164,114 @@ pub fn file_description(path: &str) -> Option<String> {
     }
 }
 
+/// A Store (MSIX) app's package: its executables have no icon and only a technical
+/// description ("WhatsApp.Root"), so the name and logo Task Manager shows come from the
+/// manifest at the package's root.
+struct Package {
+    dir: std::path::PathBuf,
+    manifest: String,
+    /// The `<Application>` element that runs this executable; for a helper executable
+    /// (a crash handler, a console host), none.
+    app: Option<String>,
+    /// The package's first `<Application>`, whose logo helpers show.
+    first: Option<String>,
+}
+
+/// The root of the package `exe` belongs to, if any: the folder above it holding
+/// `AppxManifest.xml`.
+pub fn package_dir(exe: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(exe).ancestors().skip(1).take(3).find(|d| d.join("AppxManifest.xml").is_file()).map(|d| d.to_path_buf())
+}
+
+fn package_of(exe: &str) -> Option<Package> {
+    let dir = package_dir(exe)?;
+    let exe = std::path::Path::new(exe);
+    let manifest = std::fs::read_to_string(dir.join("AppxManifest.xml")).ok()?;
+    let relative = exe.strip_prefix(&dir).ok()?.to_string_lossy().to_lowercase();
+    // `<Application Id="App" Executable="WhatsApp.Root.exe" ...> ... </Application>`
+    let mut apps = manifest.split("<Application ").skip(1).map(|a| a.split("</Application>").next().unwrap_or(a));
+    let first = apps.clone().next().map(str::to_string);
+    let app = apps.find(|a| attr(a, "Executable").is_some_and(|e| e.replace('/', "\\").to_lowercase() == relative)).map(str::to_string);
+    Some(Package { dir, app, first, manifest })
+}
+
+/// The value of `name="..."` in a piece of XML (the first one).
+fn attr<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
+    let start = xml.find(&format!(" {name}=\""))? + name.len() + 3;
+    xml[start..].split('"').next()
+}
+
+impl Package {
+    /// The app's display name: its tile's, else the package's.
+    fn name(&self) -> Option<String> {
+        let raw = self
+            .app
+            .as_deref()
+            .and_then(|a| attr(a, "DisplayName"))
+            .or_else(|| self.manifest.split("<DisplayName>").nth(1)?.split("</DisplayName>").next())?;
+        let name = if let Some(res) = raw.strip_prefix("ms-resource:") { self.resource(res)? } else { raw.to_string() };
+        (!name.trim().is_empty()).then_some(name)
+    }
+
+    /// Resolves `ms-resource:` text through the package's resources.
+    fn resource(&self, res: &str) -> Option<String> {
+        let full = self.dir.file_name()?.to_string_lossy();
+        let identity = attr(self.manifest.split("<Identity").nth(1)?, "Name")?;
+        let uri = if res.starts_with("//") {
+            format!("ms-resource:{res}")
+        } else {
+            let res = res.trim_start_matches('/');
+            if res.contains('/') { format!("ms-resource://{identity}/{res}") } else { format!("ms-resource://{identity}/Resources/{res}") }
+        };
+        let mut buf = [0u16; 512];
+        unsafe { SHLoadIndirectString(&HSTRING::from(format!("@{{{full}?{uri}}}")), &mut buf, None) }.ok()?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+
+    /// The app list logo as PNG bytes. The manifest names `Assets\AppList.png`; the files
+    /// on disk carry size and scale qualifiers (`AppList.targetsize-32_altform-unplated.png`).
+    fn logo(&self) -> Option<Vec<u8>> {
+        let base = self.app.as_deref().or(self.first.as_deref()).and_then(|a| attr(a, "Square44x44Logo"))?;
+        let base = self.dir.join(base);
+        let (dir, stem) = (base.parent()?, base.file_stem()?.to_string_lossy());
+        let wanted = ["targetsize-32_altform-unplated", "targetsize-32", "targetsize-48_altform-unplated", "targetsize-48", "scale-200", "scale-100"];
+        wanted
+            .iter()
+            .map(|q| dir.join(format!("{stem}.{q}.png")))
+            .chain([base.clone()])
+            .find_map(|p| std::fs::read(p).ok())
+    }
+}
+
+/// A Store app's name ("WhatsApp" for WhatsApp.Root.exe), for process lists.
+pub fn package_name(exe: &str) -> Option<String> {
+    package_of(exe)?.name()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_attributes() {
+        let xml = r#"<Application Id="App" Executable="WhatsApp.Root.exe" EntryPoint="x"><uap:VisualElements DisplayName="WhatsApp" Square44x44Logo="Assets\AppList.png"/>"#;
+        assert_eq!(attr(xml, "Executable"), Some("WhatsApp.Root.exe"));
+        assert_eq!(attr(xml, "DisplayName"), Some("WhatsApp"));
+        assert_eq!(attr(xml, "Square44x44Logo"), Some(r"Assets\AppList.png"));
+        assert_eq!(attr(xml, "Missing"), None);
+    }
+
+    /// What a Store app's executable resolves to. Run by hand, with the path of one:
+    /// `WSTATS_STORE_EXE=... cargo test store_app -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn store_app() {
+        let exe = std::env::var("WSTATS_STORE_EXE").expect("WSTATS_STORE_EXE");
+        let logo = package_of(&exe).and_then(|p| p.logo()).expect("a logo");
+        assert!(logo.starts_with(b"\x89PNG"));
+        println!("{exe}: {:?}, logo {} bytes", package_name(&exe), logo.len());
+    }
 
     #[test]
     fn system_tool_icons() {

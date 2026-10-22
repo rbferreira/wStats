@@ -84,13 +84,16 @@ struct Seen {
 pub struct Exes {
     /// exe path -> display name, from the file's version info. Read once per executable.
     names: HashMap<String, String>,
+    /// exe path -> what its row groups by: the package folder for a Store app (its helper
+    /// executables join it, as in Task Manager), else the path itself.
+    groups: HashMap<String, String>,
     /// `\Device\HarddiskVolume3` -> `C:`.
     drives: Vec<(String, String)>,
 }
 
 impl Exes {
     pub fn new() -> Self {
-        Self { names: HashMap::new(), drives: dos_drives() }
+        Self { names: HashMap::new(), groups: HashMap::new(), drives: dos_drives() }
     }
 
     /// `C:\...` path of a process's executable, empty for System, Registry and the like.
@@ -104,7 +107,16 @@ impl Exes {
         to_dos(&self.drives, &nt).unwrap_or_default()
     }
 
-    /// The executable's description ("Google Chrome"), else `name` without `.exe`.
+    /// The row a process with this executable belongs to (see `groups`).
+    pub fn group(&mut self, exe: &str) -> String {
+        self.groups
+            .entry(exe.to_string())
+            .or_insert_with(|| crate::shell::package_dir(exe).map_or_else(|| exe.to_string(), |d| d.to_string_lossy().into_owned()).to_lowercase())
+            .clone()
+    }
+
+    /// A Store app's name ("WhatsApp"), else the executable's description ("Google
+    /// Chrome"), else `name` without `.exe`.
     pub fn label(&mut self, exe: &str, name: &str) -> String {
         // No executable (System, Registry, Memory Compression): the name is all there is.
         if exe.is_empty() {
@@ -112,7 +124,7 @@ impl Exes {
         }
         self.names
             .entry(exe.to_string())
-            .or_insert_with(|| crate::shell::file_description(exe).unwrap_or_else(|| display_name(name)))
+            .or_insert_with(|| crate::shell::package_name(exe).or_else(|| crate::shell::file_description(exe)).unwrap_or_else(|| display_name(name)))
             .clone()
     }
 }
@@ -209,7 +221,7 @@ impl ProcCollector {
             let (read, write) = (p.read_transfer_count as u64, p.write_transfer_count as u64);
 
             let (_, owner_name, owner_exe, _) = &procs[webview_host(&nodes, &by_pid, i).unwrap_or(i)];
-            let group = if owner_exe.is_empty() { owner_name.to_lowercase() } else { owner_exe.to_lowercase() };
+            let group = if owner_exe.is_empty() { owner_name.to_lowercase() } else { self.exes.group(owner_exe) };
             let row = groups.entry(group).or_insert_with(|| ProcRow {
                 name: self.exes.label(owner_exe, owner_name),
                 exe: owner_exe.clone(),
