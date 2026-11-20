@@ -68,6 +68,14 @@ body.settings {
   padding: 14px 0;
   background: var(--sidebar);
   border-right: 1px solid var(--panel-border);
+  /* A window shorter than every page's button scrolls the sidebar instead of hiding the last ones. */
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.sidebar .nav {
+  flex-shrink: 0;
 }
 
 .sidebar .nav:last-child {
