@@ -13,6 +13,25 @@ export interface Snapshot {
   sensors: Sensors;
   system: SystemInfo;
   procs: Procs | null;
+  /** Wireless peripherals seen so far, connected first. */
+  peripherals: Peripheral[];
+}
+
+export type PeripheralKind = "headset" | "mouse" | "keyboard" | "gamepad" | "phone" | "other";
+
+export interface Peripheral {
+  /** "bt:<container>" or "lg:<unit id>". */
+  id: string;
+  name: string;
+  kind: PeripheralKind;
+  via: "bluetooth" | "logitech" | "xbox" | "playstation" | "usb";
+  percent: number;
+  charging: boolean;
+  connected: boolean;
+  /** Unix ms of the last reading taken while connected. */
+  seen: number;
+  /** Picked for the taskbar. */
+  shown: boolean;
 }
 
 export interface Cpu {
@@ -222,7 +241,7 @@ export interface History {
   fan: number[];
 }
 
-export type ModuleId = "cpu" | "gpu" | "mem" | "net" | "disk" | "battery" | "temp" | "fans" | "power" | "npu";
+export type ModuleId = "cpu" | "gpu" | "mem" | "net" | "disk" | "battery" | "temp" | "fans" | "power" | "npu" | "devices";
 
 export type Theme = "auto" | "dark" | "light";
 export type Position = "left" | "right";
@@ -256,6 +275,8 @@ export interface Settings {
   barFan: string | null;
   checkUpdates: boolean;
   updateNotified: string | null;
+  /** Peripherals (ids) shown on the taskbar, an item each. */
+  devices: string[];
 }
 
 /** New releases, as the app last checked (see update.rs). */

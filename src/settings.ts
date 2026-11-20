@@ -13,8 +13,9 @@ import type { ModuleId, MonitorInfo, Settings, UpdateStatus } from "./types";
 import { h, setText } from "./ui";
 // The app's own icon, the one the taskbar and the installer show.
 import appIcon from "../src-tauri/icons/128x128@2x.png";
+import { KIND_ICONS, sourceText } from "./modules/devices";
 
-const ALL: ModuleId[] = ["cpu", "mem", "disk", "net", "gpu", "npu", "battery", "temp", "fans", "power"];
+const ALL: ModuleId[] = ["cpu", "mem", "disk", "net", "gpu", "npu", "battery", "temp", "fans", "power", "devices"];
 
 /** Items this machine can show: the NPU only where there is one. */
 const available = () => ALL.filter((m) => m !== "npu" || !!state?.snapshot.npu);
@@ -24,7 +25,7 @@ const SERVICE_PAGES: ModuleId[] = ["temp", "fans"];
 
 /** An item's name in the current language. */
 const name = (m: ModuleId) =>
-  ({ cpu: t.cpu, gpu: t.gpu, mem: t.memory, net: t.network, disk: t.disks, battery: t.battery, temp: t.temperature, fans: t.fans, power: t.powerDraw, npu: t.npu })[m];
+  ({ cpu: t.cpu, gpu: t.gpu, mem: t.memory, net: t.network, disk: t.disks, battery: t.battery, temp: t.temperature, fans: t.fans, power: t.powerDraw, npu: t.npu, devices: t.peripherals })[m];
 
 const DEFAULTS: Settings = {
   position: "left",
@@ -45,6 +46,7 @@ const DEFAULTS: Settings = {
   barFan: null,
   checkUpdates: true,
   updateNotified: null,
+  devices: [],
 };
 
 const PALETTE = ["#3478F6", "#78C04F", "#F5C542", "#EF8240", "#EF5350", "#E85D9E", "#A06CF0", "#5AC8E8"];
@@ -66,6 +68,7 @@ const ICONS: Record<string, string> = {
   fans: svg('<circle cx="12" cy="12" r="9.2"/><circle cx="12" cy="12" r="2.2"/><path d="M11.5 9.7C11.8 7.0 14.0 4.8 16.9 4.6M13.7 10.4C16.2 9.3 19.2 10.1 20.9 12.5M14.2 12.7C16.4 14.3 17.2 17.3 16.0 19.9M12.5 14.3C12.2 17.0 10.0 19.2 7.1 19.4M10.3 13.6C7.8 14.7 4.8 13.9 3.1 11.5M9.8 11.3C7.6 9.7 6.8 6.7 8.0 4.1"/>'),
   power: svg('<path d="M13 2.8 5.5 13.2h5.6L10 21.2l8.5-11h-5.8z"/>'),
   npu: svg('<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M12 3v3M15 3v3M9 18v3M12 18v3M15 18v3M3 9h3M3 12h3M3 15h3M18 9h3M18 12h3M18 15h3"/><path d="M12 8.6l.9 2.5 2.5.9-2.5.9-.9 2.5-.9-2.5-2.5-.9 2.5-.9z" fill="currentColor" stroke-width="1"/>'),
+  devices: KIND_ICONS.headset,
   about: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.1"/>'),
   grip: svg('<path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01" stroke-width="2.6"/>'),
 };
@@ -470,6 +473,7 @@ function modulePage(id: ModuleId) {
       on ? field(t.set.positionOf(index + 1, settings.modules.length), h("div", "btn-row", left, right)) : h("p", "field-hint", t.set.turnOnForPosition),
     ),
     ...(id === "fans" ? [fanChoiceGroup()] : []),
+    ...(id === "devices" ? [deviceChoiceGroup()] : []),
     ...(SERVICE_PAGES.includes(id) ? [sensorServiceGroup()] : []),
     group(t.set.colours, h("p", "prose", t.set.coloursProse)),
   );
@@ -496,6 +500,32 @@ async function toggleSensorService(install: boolean) {
   sensorBusy = false;
   // The service publishes its first sample about a second after starting.
   setTimeout(checkSensors, install ? 1500 : 0);
+}
+
+/** Which peripherals get a taskbar item. Picking one also puts the item on the bar. */
+function deviceChoiceGroup() {
+  const all = state?.snapshot.peripherals ?? [];
+  if (!all.length) return group(t.set.devicesShown, h("p", "field-hint", t.devices.none));
+  const picked = new Set(settings.devices ?? []);
+  const rows = all.map((p) => {
+    const label = h("div", "field-label", h("span", "dev-icon"), h("span", "", p.name), h("span", "field-sub", `${sourceText(p)} · ${p.percent}%`));
+    (label.firstChild as HTMLElement).innerHTML = KIND_ICONS[p.kind] ?? KIND_ICONS.other;
+    return h(
+      "div",
+      "field row",
+      label,
+      toggle(
+        picked.has(p.id),
+        (v) =>
+          update((s) => {
+            s.devices = v ? [...(s.devices ?? []).filter((x) => x !== p.id), p.id] : (s.devices ?? []).filter((x) => x !== p.id);
+            if (v && !s.modules.includes("devices")) s.modules = [...s.modules, "devices"];
+          }),
+        p.name,
+      ),
+    );
+  });
+  return group(t.set.devicesShown, h("p", "field-hint", t.set.devicesShownHint), ...rows);
 }
 
 /** Which fans show, and which one the taskbar shows. */

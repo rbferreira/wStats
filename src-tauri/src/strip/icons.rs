@@ -4,6 +4,7 @@
 //! so the strip uses the star alone.
 
 use crate::config::ModuleId;
+use crate::stats::peripherals::Kind;
 
 pub enum Shape {
     /// Stroked path data.
@@ -43,6 +44,22 @@ pub fn shapes(m: ModuleId) -> &'static [Shape] {
             Fill("M12 3.2l1.9 5.6 5.6 1.9-5.6 1.9-1.9 5.6-1.9-5.6-5.6-1.9 5.6-1.9z"),
             Fill("M18.6 15.4l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6z"),
         ],
+        ModuleId::Devices => kind_shapes(Kind::Headset),
+    }
+}
+
+/// A peripheral's kind; the same drawings as `src/modules/devices.ts`.
+pub fn kind_shapes(k: Kind) -> &'static [Shape] {
+    match k {
+        Kind::Headset => &[Path("M4 14v-2a8 8 0 0 1 16 0v2"), Rect(3.0, 14.0, 4.0, 6.0, 1.5), Rect(17.0, 14.0, 4.0, 6.0, 1.5)],
+        Kind::Mouse => &[Rect(6.0, 3.0, 12.0, 18.0, 6.0), Path("M12 7v4")],
+        Kind::Keyboard => &[Rect(2.5, 6.0, 19.0, 12.0, 2.0), Path("M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10")],
+        Kind::Gamepad => &[
+            Path("M6 8h12a4 4 0 0 1 4 4l-.5 4a2.5 2.5 0 0 1-4.3 1.4L15.5 16h-7l-1.7 1.4A2.5 2.5 0 0 1 2.5 16L2 12a4 4 0 0 1 4-4z"),
+            Path("M7 11v3M5.5 12.5h3"),
+        ],
+        Kind::Phone => &[Rect(7.0, 2.5, 10.0, 19.0, 2.0), Path("M11 18.5h2")],
+        Kind::Other => &[Path("M7 7l10 10-5 4V3l5 4L7 17")],
     }
 }
 
@@ -218,6 +235,15 @@ mod tests {
                     let segs = parse(d);
                     let commands = d.chars().filter(|c| c.is_ascii_alphabetic()).count();
                     assert!(segs.len() >= commands, "{m:?}: {d}");
+                }
+            }
+        }
+        use crate::stats::peripherals::Kind;
+        for k in [Kind::Headset, Kind::Mouse, Kind::Keyboard, Kind::Gamepad, Kind::Phone, Kind::Other] {
+            for shape in kind_shapes(k) {
+                if let Path(d) | Fill(d) = shape {
+                    let commands = d.chars().filter(|c| c.is_ascii_alphabetic()).count();
+                    assert!(parse(d).len() >= commands, "{k:?}: {d}");
                 }
             }
         }

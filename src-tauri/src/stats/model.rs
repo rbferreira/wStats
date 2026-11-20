@@ -22,6 +22,8 @@ pub struct Snapshot {
     /// Only filled while a popup is open: walking every process is the most expensive
     /// thing the sampler does, and nobody looks at it otherwise.
     pub procs: Option<Procs>,
+    /// Wireless peripherals seen so far, connected first.
+    pub peripherals: Vec<super::peripherals::Peripheral>,
 }
 
 impl Snapshot {

@@ -19,7 +19,7 @@ Good-looking, light, and always in sight.
 
 ## What it is
 
-wStats puts small graphs of **CPU, GPU, NPU, memory, disk, network, battery, temperature, fans and power draw** right in the taskbar. Clicking an item opens a panel with the details: up to 24 hours of history, processes, cores, sensors and shortcuts to the Windows tools.
+wStats puts small graphs of **CPU, GPU, NPU, memory, disk, network, battery, temperature, fans and power draw**, plus the battery of your wireless mouse, keyboard, headset or controller, right in the taskbar. Clicking an item opens a panel with the details: up to 24 hours of history, processes, cores, sensors and shortcuts to the Windows tools.
 
 What sets it apart from other monitors is that **wStats is part of the taskbar**: it does not float on top of it. App icons make room for it the way they do for the Widgets button, and everything reflows when you turn an item on or off.
 
@@ -57,6 +57,7 @@ For a lighter taskbar, the **compact mode** puts two items per column, numbers o
 | **Temperature** | a thermometer that rises and changes colour: the theme colour up to 70°, then yellow, orange, and red from 90° | each core, motherboard sensors (desktop) or board sensors (Dell), GPU, 24 h history |
 | **Fans** | the fastest one, in RPM | each fan (motherboard headers on desktops, Dell laptops, GPU), history, the BIOS thermal mode (Dell) |
 | **Power** | CPU power draw in watts | power by component (RAPL), GPU (NVIDIA), battery, 24 h history |
+| **Devices** | one item per wireless device you pick: its kind, battery level and a meter (red at 20% or less); gone while it is disconnected | every device found, the disconnected ones with their last reading and how long ago |
 
 Also:
 
@@ -66,6 +67,7 @@ Also:
 - **Labels your way**: above, below, beside, none, or the number inside its graphic, with a live preview in Settings. The graphics can be turned off, leaving the text alone.
 - **Compact mode**: two items per column, numbers only, tagged by icon, label or mini graphic, on the left or the right. Takes less than half the space.
 - **Item order** set by dragging in Settings.
+- **Wireless devices** read without vendor software: Bluetooth devices Windows reports a battery for, Logitech mice, keyboards and headsets (HID++, on a Unifying, Bolt or Lightspeed receiver, a cable or Bluetooth), Xbox controllers, DualSense and DualShock 4, and USB receivers that report a battery. Only queries are sent; wStats changes nothing on the devices.
 - **English and Portuguese**, following the Windows language or chosen in Settings; the installer is bilingual too.
 - **Save memory**: unloads the panels after a minute unused, and wStats drops to about 18 MB (with the panels always ready it sits around 110 MB, almost all of it WebView2).
 - **Start with Windows**, with a menu in the tray and on the taskbar's right click.

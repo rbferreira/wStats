@@ -12,6 +12,7 @@ mod net;
 mod npu;
 mod nvml;
 mod pdh;
+pub mod peripherals;
 pub mod ping;
 mod sensors;
 mod power;
@@ -57,6 +58,9 @@ pub struct Control {
     pub pinger: Option<Arc<ping::Pinger>>,
     /// Fan choices from Settings.
     pub fans: RwLock<FanPrefs>,
+    /// Peripherals picked for the taskbar (ids), and whether the item is on it.
+    pub devices: RwLock<Vec<String>>,
+    pub devices_on: AtomicBool,
 }
 
 #[derive(Default, Clone)]
@@ -67,14 +71,19 @@ pub struct FanPrefs {
     pub bar: Option<String>,
 }
 
-pub fn spawn(store: Shared, control: Arc<Control>, on_tick: impl Fn(&Snapshot) + Send + 'static) {
+pub fn spawn(store: Shared, control: Arc<Control>, peripherals_file: Option<std::path::PathBuf>, on_tick: impl Fn(&Snapshot) + Send + 'static) {
+    let devices = Arc::new(RwLock::new(peripherals::Peripherals::load(peripherals_file)));
+    {
+        let control = control.clone();
+        peripherals::spawn_poller(devices.clone(), move || control.devices_on.load(Ordering::Relaxed) || control.settings_open.load(Ordering::Relaxed));
+    }
     std::thread::Builder::new()
         .name("sampler".into())
-        .spawn(move || run(store, control, on_tick))
+        .spawn(move || run(store, control, devices, on_tick))
         .expect("spawn sampler");
 }
 
-fn run(store: Shared, control: Arc<Control>, on_tick: impl Fn(&Snapshot)) {
+fn run(store: Shared, control: Arc<Control>, devices: Arc<RwLock<peripherals::Peripherals>>, on_tick: impl Fn(&Snapshot)) {
     let Some(q) = pdh::Query::new() else {
         log::error!("PDH unavailable; sampler not running");
         return;
@@ -130,6 +139,14 @@ fn run(store: Shared, control: Arc<Control>, on_tick: impl Fn(&Snapshot)) {
             sensors: sensor.sample(&q),
             system: SystemInfo { uptime_secs: unsafe { GetTickCount64() } / 1000, ..static_info.clone() },
             procs: detailed.then(|| procs.sample()),
+            peripherals: {
+                let picked = control.devices.read();
+                let mut list = devices.read().list().to_vec();
+                for p in &mut list {
+                    p.shown = picked.contains(&p.id);
+                }
+                list
+            },
         };
         let mut snap = snap;
         // The sensor service may be installed or started at any time: look for it every
