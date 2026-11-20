@@ -362,6 +362,8 @@ pub struct History {
     pub temp: Ring,
     /// Fastest fan, RPM.
     pub fan: Ring,
+    /// Ping round trip in ms; -1 where it went unanswered.
+    pub ping: Ring,
 }
 
 pub const HISTORY_LEN: usize = 600;
@@ -385,6 +387,7 @@ impl History {
             power: r(),
             temp: r(),
             fan: r(),
+            ping: r(),
         }
     }
 
@@ -420,6 +423,7 @@ impl History {
         if let Some(f) = s.sensors.bar_fan_rpm() {
             self.fan.push(f);
         }
+        self.ping.push(s.net.ping_ms.map_or(-1.0, |ms| ms as f32));
         if let Some(b) = &s.battery {
             self.battery.push(b.percent);
             self.battery_charging.push(if b.charging { 1.0 } else { 0.0 });
