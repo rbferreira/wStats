@@ -230,6 +230,7 @@ fn name(m: ModuleId) -> &'static str {
         ModuleId::Power => "PWR",
         ModuleId::Npu => "NPU",
         ModuleId::Devices => "DEV",
+        ModuleId::Latency => "PING",
     }
 }
 
@@ -252,6 +253,7 @@ fn graphic_width(m: ModuleId) -> f32 {
         ModuleId::Temp => 14.0,
         ModuleId::Power => 16.0,
         ModuleId::Npu => 30.0,
+        ModuleId::Latency => 28.0,
         ModuleId::Devices => 24.0,
     }
 }
@@ -264,6 +266,7 @@ fn widest(m: ModuleId) -> Reading {
         ModuleId::Temp => value("100°", ""),
         ModuleId::Fans => value("9999", ""),
         ModuleId::Power => value("999", "W"),
+        ModuleId::Latency => value("999", "ms"),
         ModuleId::Net => Reading::Rates { up: "99".into(), down: "99".into(), unit: "MB/s" },
     }
 }
@@ -376,7 +379,7 @@ fn inside(m: ModuleId, look: Look) -> Inside {
         return Inside::No;
     }
     match m {
-        ModuleId::Cpu | ModuleId::Gpu | ModuleId::Npu | ModuleId::Net => Inside::Graph,
+        ModuleId::Cpu | ModuleId::Gpu | ModuleId::Npu | ModuleId::Net | ModuleId::Latency => Inside::Graph,
         ModuleId::Mem | ModuleId::Disk => Inside::Ring,
         _ => Inside::No,
     }
@@ -516,7 +519,7 @@ fn compact_widths(m: ModuleId, short: Option<&str>, tag: Tag, s: f32) -> (f32, f
         let tag_w = match (m, tag) {
             (ModuleId::Net, Tag::Graphic) => (MINI_GRAPH + 2.0) * s + w(vec![part(0.0, "↑", Font::Arrow, 1.0)]),
             (ModuleId::Net, _) => w(vec![part(0.0, "↑", Font::Arrow, 1.0)]),
-            (ModuleId::Cpu | ModuleId::Gpu, Tag::Graphic) => MINI_GRAPH * s,
+            (ModuleId::Cpu | ModuleId::Gpu | ModuleId::Latency, Tag::Graphic) => MINI_GRAPH * s,
             (_, Tag::Graphic) => MINI * s,
             (_, Tag::Icon) => ICON * s,
             (_, Tag::Label) => w(vec![part(0.0, short.unwrap_or(name(m)), Font::CompactTag, 1.0)]),
@@ -989,6 +992,42 @@ impl Ctx<'_> {
         }
     }
 
+    /// The latency's history as a line, each stretch in the colour of its value (green,
+    /// yellow above 80 ms); a ping without an answer breaks the line with a red tick at
+    /// the top. The scale is the window's peak, never under 40 ms, so that a quiet
+    /// connection's jitter does not fill the box.
+    fn latency_line(&self, x: f32, y: f32, w: f32, h: f32, data: &[f32], alpha: f32, frame: bool) {
+        let s = self.s;
+        if frame {
+            self.round_rect(x, y, w, h, 3.0 * s, self.fg.alpha(0.1));
+        }
+        let pad = if frame { (2.0 * s).round() } else { 1.0 * s };
+        let step = 2.0 * s;
+        let n = (((w - 2.0 * pad) / step).floor() as usize + 1).min(data.len());
+        if n == 0 {
+            return;
+        }
+        let tail = &data[data.len() - n..];
+        let peak = tail.iter().fold(40.0f32, |m, v| m.max(*v));
+        let stroke = (1.2 * s).max(1.0);
+        let (top, bottom) = (y + pad + stroke / 2.0, y + h - pad - stroke / 2.0);
+        let px = |i: usize| x + w - pad - (n - 1 - i) as f32 * step;
+        let py = |v: f32| bottom - (v / peak).clamp(0.0, 1.0) * (bottom - top);
+        for i in 0..n {
+            let v = tail[i];
+            if v < 0.0 {
+                self.rect(px(i) - stroke / 2.0, top - stroke / 2.0, stroke, 3.0 * s, Rgba::RED.alpha(alpha));
+                continue;
+            }
+            if i > 0 && tail[i - 1] >= 0.0 {
+                let color = self.color(latency_color(Some(v as u32)).alpha(alpha));
+                unsafe {
+                    self.t().DrawLine(Vector2 { X: px(i - 1), Y: py(tail[i - 1]) }, Vector2 { X: px(i), Y: py(v) }, color, stroke, &self.r.round);
+                }
+            }
+        }
+    }
+
     /// Mirrored mini graph: `up` grows from the middle upwards, `down` downwards.
     fn mirror(&self, x: f32, w: f32, up: &[f32], down: &[f32], fade: f32, frame: bool) {
         let s = self.s;
@@ -1260,6 +1299,7 @@ impl Ctx<'_> {
                 Reading::Rates { up, down, unit }
             }
             ModuleId::Npu => snap.npu.as_ref().map_or_else(none, |n| pct(n.util)),
+            ModuleId::Latency => snap.net.ping_ms.map_or_else(none, |ms| Reading::Value { value: ms.min(9999).to_string(), unit: "ms" }),
             ModuleId::Devices => none(), // drawn by device_item, from the device
         }
     }
@@ -1321,6 +1361,10 @@ impl Ctx<'_> {
             ModuleId::Fans => self.fan(x),
             ModuleId::Power => self.bolt(x),
             ModuleId::Npu => self.chip(x, snap.npu.as_ref().map(|n| n.util / 100.0)),
+            ModuleId::Latency => {
+                let h = 30.0 * s;
+                self.latency_line(x, (self.h - h) / 2.0, gw, h, &hist.ping.last_n(64).collect::<Vec<_>>(), 1.0, true);
+            }
             ModuleId::Devices => {}
         }
     }
@@ -1455,6 +1499,10 @@ impl Ctx<'_> {
             ModuleId::Cpu => self.graph(x, w, &[(hist.cpu_user.last_n(64).collect(), self.primary.alpha(FADE)), (hist.cpu_system.last_n(64).collect(), self.secondary.alpha(FADE))], 100.0, false),
             ModuleId::Gpu => self.graph(x, w, &[(hist.gpus.first().map(|r| r.last_n(64).collect()).unwrap_or_default(), self.primary.alpha(FADE))], 100.0, false),
             ModuleId::Npu => self.graph(x, w, &[(hist.npu.last_n(64).collect(), self.primary.alpha(FADE))], 100.0, false),
+            ModuleId::Latency => {
+                let h = 30.0 * self.s;
+                self.latency_line(x, (self.h - h) / 2.0, w, h, &hist.ping.last_n(64).collect::<Vec<_>>(), 0.6, false);
+            }
             _ => self.mirror(x, w, &hist.net_up.last_n(64).collect::<Vec<_>>(), &hist.net_down.last_n(64).collect::<Vec<_>>(), FADE, false),
         }
         self.centred(x, w, &tabular(lines(m, Label::Bottom, &narrow_text(self.reading(m, snap)))));
@@ -1532,6 +1580,7 @@ impl Ctx<'_> {
                 let (from, k) = full(8.5, 28.0);
                 self.scaled(k, from, (cx, cy), || self.bolt(x));
             }
+            ModuleId::Latency => self.latency_line(x, top, MINI_GRAPH * s, h, &hist.ping.last_n(64).collect::<Vec<_>>(), 1.0, true),
             ModuleId::Net | ModuleId::Devices => {}
         }
     }
@@ -1618,6 +1667,16 @@ impl Ctx<'_> {
 }
 
 /// Used fraction of C: (or the first volume).
+/// The latency's colour, as the network popup's dot: green, yellow above 80 ms, red
+/// without an answer.
+fn latency_color(ms: Option<u32>) -> Rgba {
+    match ms {
+        None => Rgba::RED,
+        Some(ms) if ms > 80 => Rgba::YELLOW,
+        Some(_) => Rgba::GREEN,
+    }
+}
+
 fn disk_used(snap: &Snapshot) -> f32 {
     snap.disk
         .volumes
@@ -1669,6 +1728,12 @@ mod tests {
             snap.sensors.fans = vec![reading(2140.0)];
             snap.sensors.power = vec![reading(18.0)];
             snap.npu = Some(Npu { name: "NPU".into(), util: 64.0, ..Default::default() });
+            // A steady ping with a spike and one lost reply.
+            snap.net.ping_ms = match i {
+                44 => None,
+                50..=53 => Some(95),
+                _ => Some((11.0 + 9.0 * noise()) as u32),
+            };
             let snap = snap.clone();
             store.history.record(&snap);
         }
@@ -1676,6 +1741,7 @@ mod tests {
         store.snapshot.net.down = 8.0 * 1024.0;
         store.snapshot.cpu.total = 36.0;
         store.snapshot.gpus[0].util = 10.0;
+        store.snapshot.net.ping_ms = Some(14);
         use crate::stats::peripherals::{Kind, Peripheral, Via};
         let dev = |name: &str, kind, percent, charging| Peripheral { id: name.into(), name: name.into(), kind, via: Via::Logitech, percent, charging, connected: true, seen: 1, shown: true };
         store.snapshot.peripherals =
@@ -1701,6 +1767,7 @@ mod tests {
             ModuleId::Temp,
             ModuleId::Fans,
             ModuleId::Power,
+            ModuleId::Latency,
         ];
         let colors = (Rgba::BLUE, Rgba::GREEN);
         let save = |name: &str, url: Option<String>| {
@@ -1720,7 +1787,7 @@ mod tests {
             shots(&format!("{tag}-plain"), Look { label, graphics: false, ..Look::default() });
         }
         shots("inside", Look { label: Label::Inside, ..Look::default() });
-        let mine = [ModuleId::Cpu, ModuleId::Gpu, ModuleId::Npu, ModuleId::Mem, ModuleId::Disk, ModuleId::Net, ModuleId::Temp, ModuleId::Fans];
+        let mine = [ModuleId::Cpu, ModuleId::Gpu, ModuleId::Npu, ModuleId::Mem, ModuleId::Disk, ModuleId::Net, ModuleId::Latency, ModuleId::Temp, ModuleId::Fans];
         let devs = [ModuleId::Devices, ModuleId::Devices, ModuleId::Devices];
         for (name, look) in [
             ("devices-bottom", Look { label: Label::Bottom, ..Look::default() }),

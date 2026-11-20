@@ -20,6 +20,8 @@ pub enum ModuleId {
     Npu,
     /// Wireless peripherals: one strip item per device picked in Settings.
     Devices,
+    /// Round trip to the ping host.
+    Latency,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]

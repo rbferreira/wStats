@@ -24,4 +24,6 @@ export const MODULES: Record<ModuleId, () => Module> = {
   power: powerModule,
   npu: npuModule,
   devices: devicesModule,
+  // The ping card lives in the network menu.
+  latency: netModule,
 };

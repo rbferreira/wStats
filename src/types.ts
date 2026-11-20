@@ -241,7 +241,7 @@ export interface History {
   fan: number[];
 }
 
-export type ModuleId = "cpu" | "gpu" | "mem" | "net" | "disk" | "battery" | "temp" | "fans" | "power" | "npu" | "devices";
+export type ModuleId = "cpu" | "gpu" | "mem" | "net" | "disk" | "battery" | "temp" | "fans" | "power" | "npu" | "devices" | "latency";
 
 export type Theme = "auto" | "dark" | "light";
 export type Position = "left" | "right";
