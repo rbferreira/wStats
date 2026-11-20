@@ -624,22 +624,23 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
+const TARGET: D2D1_RENDER_TARGET_PROPERTIES = D2D1_RENDER_TARGET_PROPERTIES {
+    // Software: the strip is a few hundred pixels redrawn once a second; a GPU device
+    // (and the graphics driver it loads) would cost tens of MB for nothing.
+    r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+    dpiX: 96.0,
+    dpiY: 96.0,
+    usage: D2D1_RENDER_TARGET_USAGE_NONE,
+    minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+};
+
 impl Renderer {
     pub fn new() -> Result<Self> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let props = D2D1_RENDER_TARGET_PROPERTIES {
-                // Software: the strip is a few hundred pixels redrawn once a second; a GPU
-                // device (and the graphics driver it loads) would cost tens of MB for nothing.
-                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let target = factory.CreateDCRenderTarget(&props)?;
+            let target = factory.CreateDCRenderTarget(&TARGET)?;
             let round = factory.CreateStrokeStyle(
                 &D2D1_STROKE_STYLE_PROPERTIES {
                     startCap: D2D1_CAP_STYLE_ROUND,
@@ -688,7 +689,13 @@ impl Renderer {
                 ..Default::default()
             };
             let mut bits = std::ptr::null_mut();
-            let bmp = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+            let bmp = match CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(bmp) => bmp,
+                Err(e) => {
+                    let _ = DeleteDC(dc);
+                    return Err(e);
+                }
+            };
             let old = SelectObject(dc, bmp.into());
             self.dib = Some((dc, bmp, old, w, h, bits.cast()));
             Ok(dc)
@@ -723,6 +730,18 @@ impl Renderer {
 
     /// Renders every slot into the backing bitmap.
     pub fn paint(&mut self, frame: &Frame, store: &Store) -> Result<()> {
+        let drawn = self.draw(frame, store);
+        if drawn.is_err() {
+            // A target that failed (it asks to be recreated after a display change) fails
+            // every frame from then on: start the next one with a new target.
+            if let Ok(target) = unsafe { self.factory.CreateDCRenderTarget(&TARGET) } {
+                self.target = target;
+            }
+        }
+        drawn
+    }
+
+    fn draw(&mut self, frame: &Frame, store: &Store) -> Result<()> {
         let (w, h) = (frame.width.max(1), frame.height.max(1));
         let dc = self.surface(w, h)?;
         let s = frame.scale;
@@ -736,7 +755,13 @@ impl Renderer {
             // invisible but keeps the whole strip clickable.
             self.target.Clear(Some(&Rgba(0.0, 0.0, 0.0, 1.0 / 255.0).d2d()));
             let fg = if frame.light { Rgba(0.0, 0.0, 0.0, 0.9) } else { Rgba(1.0, 1.0, 1.0, 1.0) };
-            let brush = self.target.CreateSolidColorBrush(&fg.d2d(), None)?;
+            let brush = match self.target.CreateSolidColorBrush(&fg.d2d(), None) {
+                Ok(brush) => brush,
+                Err(e) => {
+                    let _ = self.target.EndDraw(None, None);
+                    return Err(e);
+                }
+            };
             // Designs are drawn for a 48-DIP bar; a taller or shorter one centres them.
             let oy = (h as f32 / s - 48.0) / 2.0;
             let devices: Vec<&Peripheral> = peripherals::on_taskbar(&store.snapshot.peripherals).collect();

@@ -60,6 +60,8 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
     winrt::com_ptr<IXamlDiagnostics> m_diag;
     Core m_core;
     SRWLOCK m_lock = SRWLOCK_INIT;
+    // Tree-change callbacks inside the core right now (they come on the taskbars' threads).
+    std::atomic<long> m_calls{0};
 
     bool LoadCore()
     {
@@ -106,11 +108,22 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
             return;
         }
         HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        dispatcher.as<winrt::Windows::UI::Core::CoreDispatcher>().RunAsync(
-            winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [&] {
-                f();
-                SetEvent(done);
-            });
+        try
+        {
+            dispatcher.as<winrt::Windows::UI::Core::CoreDispatcher>().RunAsync(
+                winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [&] {
+                    f();
+                    SetEvent(done);
+                });
+        }
+        catch (...)
+        {
+            // The XAML thread takes no more work, so nothing of ours runs there either.
+            wstats::Trace(L"stub: the dispatcher refused the call; detaching on the stub thread");
+            if (done) CloseHandle(done);
+            f();
+            return;
+        }
         if (WaitForSingleObject(done, 10000) == WAIT_TIMEOUT)
         {
             wstats::Trace(L"stub: detach still running after 10 s, waiting");
@@ -124,6 +137,23 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
     // refuse it (E_UNEXPECTED, seen after the Widgets button was turned off); a refusal is
     // retried with a growing delay, reloads still being served meanwhile.
     void Serve()
+    {
+        // An exception leaving a thread procedure would take Explorer down with it.
+        try
+        {
+            ServeLoop();
+        }
+        catch (winrt::hresult_error const& e)
+        {
+            wstats::Trace(L"stub: serving stopped, 0x%08X", static_cast<unsigned>(e.code()));
+        }
+        catch (...)
+        {
+            wstats::Trace(L"stub: serving stopped");
+        }
+    }
+
+    void ServeLoop()
     {
         auto tree = m_diag.as<IVisualTreeService3>();
         HANDLE reload = CreateEventW(nullptr, FALSE, FALSE, wstats::kReloadEvent);
@@ -157,8 +187,15 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
                 ReleaseSRWLockExclusive(&m_lock);
                 if (old.module)
                 {
+                    // A callback that read the old pointer before the swap may still be
+                    // inside the core, on another taskbar's thread: let it leave first.
+                    bool idle = false;
+                    for (int i = 0; i < 3000 && !(idle = m_calls.load() == 0); i++) Sleep(1);
                     old.detach();
-                    FreeLibrary(old.module);
+                    if (idle)
+                        FreeLibrary(old.module);
+                    else
+                        wstats::Trace(L"stub: a callback is still inside the old core; leaving it loaded");
                 }
             });
             LoadCore();
@@ -203,10 +240,12 @@ struct VisualTreeWatcher : winrt::implements<VisualTreeWatcher, IObjectWithSite,
 
     HRESULT STDMETHODCALLTYPE OnVisualTreeChange(ParentChildRelation rel, VisualElement el, VisualMutationType type) noexcept override
     {
+        ++m_calls;
         AcquireSRWLockShared(&m_lock);
         auto change = m_core.treeChange;
         ReleaseSRWLockShared(&m_lock);
         if (change) change(rel, el, type);
+        --m_calls;
         return S_OK;
     }
 
