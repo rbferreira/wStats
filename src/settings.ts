@@ -15,7 +15,7 @@ import { h, setText } from "./ui";
 import appIcon from "../src-tauri/icons/128x128@2x.png";
 import { KIND_ICONS, sourceText } from "./modules/devices";
 
-const ALL: ModuleId[] = ["cpu", "mem", "disk", "net", "gpu", "npu", "battery", "temp", "fans", "power", "devices"];
+const ALL: ModuleId[] = ["cpu", "mem", "disk", "net", "latency", "gpu", "npu", "battery", "temp", "fans", "power", "devices"];
 
 /** Items this machine can show: the NPU only where there is one. */
 const available = () => ALL.filter((m) => m !== "npu" || !!state?.snapshot.npu);
@@ -25,7 +25,7 @@ const SERVICE_PAGES: ModuleId[] = ["temp", "fans"];
 
 /** An item's name in the current language. */
 const name = (m: ModuleId) =>
-  ({ cpu: t.cpu, gpu: t.gpu, mem: t.memory, net: t.network, disk: t.disks, battery: t.battery, temp: t.temperature, fans: t.fans, power: t.powerDraw, npu: t.npu, devices: t.peripherals })[m];
+  ({ cpu: t.cpu, gpu: t.gpu, mem: t.memory, net: t.network, disk: t.disks, battery: t.battery, temp: t.temperature, fans: t.fans, power: t.powerDraw, npu: t.npu, devices: t.peripherals, latency: t.latency })[m];
 
 const DEFAULTS: Settings = {
   position: "left",
@@ -69,6 +69,7 @@ const ICONS: Record<string, string> = {
   power: svg('<path d="M13 2.8 5.5 13.2h5.6L10 21.2l8.5-11h-5.8z"/>'),
   npu: svg('<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M12 3v3M15 3v3M9 18v3M12 18v3M15 18v3M3 9h3M3 12h3M3 15h3M18 9h3M18 12h3M18 15h3"/><path d="M12 8.6l.9 2.5 2.5.9-2.5.9-.9 2.5-.9-2.5-2.5-.9 2.5-.9z" fill="currentColor" stroke-width="1"/>'),
   devices: KIND_ICONS.headset,
+  latency: svg('<path d="M2.5 12.5h4l2.5-6 5 11 2.5-5h5"/>'),
   about: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.1"/>'),
   grip: svg('<path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01" stroke-width="2.6"/>'),
 };
@@ -474,6 +475,7 @@ function modulePage(id: ModuleId) {
     ),
     ...(id === "fans" ? [fanChoiceGroup()] : []),
     ...(id === "devices" ? [deviceChoiceGroup()] : []),
+    ...(id === "latency" ? [group(t.ping, field(t.set.pingAddress, pingInput(), t.set.pingHint))] : []),
     ...(SERVICE_PAGES.includes(id) ? [sensorServiceGroup()] : []),
     group(t.set.colours, h("p", "prose", t.set.coloursProse)),
   );

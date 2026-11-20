@@ -53,6 +53,7 @@ Para quem quer a barra livre, o **modo compacto** põe dois itens por coluna, s�
 | **Memória** | anel de uso | pressão, composição (apps, kernel, cache), processos, arquivo de paginação |
 | **Discos** | espaço usado do C: | volumes, leitura/gravação com histórico, processos que mais leem e gravam |
 | **Rede** | upload e download, na mesma unidade | histórico, Wi-Fi (SSID, sinal, canal, padrão), ping, IP público e local, tráfego da sessão |
+| **Latência** | o tempo de resposta do ping em ms, com o último minuto numa linha: verde, amarela acima de 80 ms, uma marca vermelha onde o ping ficou sem resposta | o painel de rede, com o card do ping |
 | **Bateria** | carga, em pé; verde carregando, vermelha com 20% ou menos | saúde, ciclos, capacidade, potência de carga ou descarga, tempo restante |
 | **Temperatura** | termômetro que sobe com a temperatura e muda de cor: na cor do tema até 70°, amarelo, laranja e vermelho a partir de 90° | cada núcleo, sensores da placa-mãe (desktop) ou da placa (Dell), GPU, histórico de 24 h |
 | **Ventoinhas** | a mais rápida, em RPM | cada ventoinha (conectores da placa-mãe em desktops, notebooks Dell, GPU), histórico, perfil térmico da BIOS (Dell) |

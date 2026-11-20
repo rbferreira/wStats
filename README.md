@@ -53,6 +53,7 @@ For a lighter taskbar, the **compact mode** puts two items per column, numbers o
 | **Memory** | usage ring | pressure, breakdown (apps, kernel, cache), processes, page file |
 | **Disks** | space used on C: | volumes, read/write with history, the processes reading and writing most |
 | **Network** | upload and download, in one unit | history, Wi-Fi (SSID, signal, channel, standard), ping, public and local IP, session traffic |
+| **Latency** | the ping round trip in ms over its last minute as a line: green, yellow above 80 ms, a red tick where a ping went unanswered | the network panel, with the ping card |
 | **Battery** | charge, standing up; green while charging, red at 20% or less | health, cycles, capacity, charge or discharge power, time remaining |
 | **Temperature** | a thermometer that rises and changes colour: the theme colour up to 70°, then yellow, orange, and red from 90° | each core, motherboard sensors (desktop) or board sensors (Dell), GPU, 24 h history |
 | **Fans** | the fastest one, in RPM | each fan (motherboard headers on desktops, Dell laptops, GPU), history, the BIOS thermal mode (Dell) |

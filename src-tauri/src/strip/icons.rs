@@ -21,6 +21,9 @@ pub enum Shape {
 
 use Shape::*;
 
+/// A pulse: the latency item, on the strip and in the settings window.
+pub const LATENCY: &str = "M2.5 12.5h4l2.5-6 5 11 2.5-5h5";
+
 pub fn shapes(m: ModuleId) -> &'static [Shape] {
     match m {
         ModuleId::Cpu => &[
@@ -45,6 +48,7 @@ pub fn shapes(m: ModuleId) -> &'static [Shape] {
             Fill("M18.6 15.4l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6z"),
         ],
         ModuleId::Devices => kind_shapes(Kind::Headset),
+        ModuleId::Latency => &[Path(LATENCY)],
     }
 }
 
@@ -229,7 +233,7 @@ mod tests {
     /// Every icon parses all the way through.
     #[test]
     fn every_icon_parses() {
-        for m in [ModuleId::Cpu, ModuleId::Gpu, ModuleId::Npu, ModuleId::Mem, ModuleId::Net, ModuleId::Disk, ModuleId::Battery, ModuleId::Temp, ModuleId::Fans, ModuleId::Power] {
+        for m in [ModuleId::Cpu, ModuleId::Gpu, ModuleId::Npu, ModuleId::Mem, ModuleId::Net, ModuleId::Disk, ModuleId::Battery, ModuleId::Temp, ModuleId::Fans, ModuleId::Power, ModuleId::Latency] {
             for shape in shapes(m) {
                 if let Path(d) | Fill(d) = shape {
                     let segs = parse(d);
