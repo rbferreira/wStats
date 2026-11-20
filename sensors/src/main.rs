@@ -26,7 +26,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoInitializeSecurity, EOAC_NONE, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE};
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceFailureActions, ServiceFailureResetPeriod, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus,
     ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
@@ -48,6 +48,9 @@ const INTERVAL: Duration = Duration::from_secs(1);
 /// WMI method calls cost more than MSR reads; fans and board sensors change slowly.
 const DDV_INTERVAL: Duration = Duration::from_secs(2);
 const MODE_INTERVAL: Duration = Duration::from_secs(10);
+/// Sources that did not open are tried again this often, this many times.
+const RETRY_EVERY: Duration = Duration::from_secs(60);
+const RETRIES: u32 = 10;
 
 #[derive(Serialize)]
 struct Payload<'a> {
@@ -80,6 +83,9 @@ struct Sampler {
     mode: Option<dell::ThermalMode>,
     mode_at: Option<Instant>,
     notes: Vec<String>,
+    /// When the missing sources were last tried, and how many tries are left.
+    opened_at: Instant,
+    retries: u32,
 }
 
 impl Sampler {
@@ -88,37 +94,65 @@ impl Sampler {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let _ = CoInitializeSecurity(None, -1, None, None, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, None, EOAC_NONE, None);
         }
-        let mut notes = Vec::new();
+        let mut me = Self {
+            cpu: None,
+            rapl: None,
+            power: Vec::new(),
+            sio: None,
+            board: None,
+            ddv: None,
+            ddv_at: None,
+            fans: Vec::new(),
+            thermals: Vec::new(),
+            mode: None,
+            mode_at: None,
+            notes: Vec::new(),
+            opened_at: Instant::now(),
+            retries: RETRIES,
+        };
+        me.open_missing();
+        me
+    }
+
+    /// Opens the sources that are not open yet and notes why the rest are missing.
+    fn open_missing(&mut self) {
+        self.opened_at = Instant::now();
+        self.notes.clear();
         let lib = pawnio::Lib::load();
-        let cpu = match lib.clone().and_then(|lib| cpu::Reader::open(&lib)) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                notes.push(format!("cpu: {e}"));
-                None
+        if self.cpu.is_none() {
+            match lib.clone().and_then(|lib| cpu::Reader::open(&lib)) {
+                Ok(r) => {
+                    self.rapl = rapl::Rapl::open(&r);
+                    self.cpu = Some(r);
+                }
+                Err(e) => self.notes.push(format!("cpu: {e}")),
             }
-        };
-        let rapl = cpu.as_ref().and_then(rapl::Rapl::open);
-        if cpu.is_some() && rapl.is_none() {
-            notes.push("power: no RAPL counters".into());
         }
-        let sio = match lib.and_then(|lib| superio::SuperIo::open(&lib)) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                notes.push(format!("superio: {e}"));
-                None
+        if self.cpu.is_some() && self.rapl.is_none() {
+            self.notes.push("power: no RAPL counters".into());
+        }
+        if self.sio.is_none() {
+            match lib.and_then(|lib| superio::SuperIo::open(&lib)) {
+                Ok(s) => self.sio = Some(s),
+                Err(e) => self.notes.push(format!("superio: {e}")),
             }
-        };
-        let ddv = match dell::Ddv::open() {
-            Ok(d) => Some(d),
-            Err(e) => {
-                notes.push(e);
-                None
+        }
+        if self.ddv.is_none() {
+            match dell::Ddv::open() {
+                Ok(d) => self.ddv = Some(d),
+                Err(e) => self.notes.push(e),
             }
-        };
-        Self { cpu, rapl, power: Vec::new(), sio, board: None, ddv, ddv_at: None, fans: Vec::new(), thermals: Vec::new(), mode: None, mode_at: None, notes }
+        }
     }
 
     fn sample(&mut self) -> Vec<u8> {
+        // A source can fail at boot for a passing reason (the bus held by another monitor,
+        // WMI or the driver not up yet). Try again a few times, then take the answer.
+        let missing = self.cpu.is_none() || self.sio.is_none() || self.ddv.is_none();
+        if missing && self.retries > 0 && self.opened_at.elapsed() >= RETRY_EVERY {
+            self.retries -= 1;
+            self.open_missing();
+        }
         if let (Some(rapl), Some(cpu)) = (&mut self.rapl, &self.cpu) {
             self.power = rapl.read(cpu);
         }
@@ -271,6 +305,16 @@ fn install() -> Result<(), String> {
         None => manager.create_service(&info, access).map_err(|e| format!("create service: {e}"))?,
     };
     let _ = service.set_description(description());
+    // The service aborts on a panic: have Windows bring it back instead of leaving the
+    // sensors off until the next boot.
+    let restart = ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(5) };
+    let _ = service.update_failure_actions(ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![restart.clone(), restart.clone(), restart]),
+    });
+    let _ = service.set_failure_actions_on_non_crash_failures(false);
     service.start::<&str>(&[]).map_err(|e| format!("start service: {e}"))
 }
 

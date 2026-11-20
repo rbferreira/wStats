@@ -9,10 +9,13 @@ use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayGetLBound, SafeA
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VT_ARRAY, VT_BSTR, VT_I4, VT_UI1, VariantClear};
 use windows::Win32::System::Wmi::IEnumWbemClassObject;
-use windows::Win32::System::Wmi::{IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE, WbemLocator};
+use windows::Win32::System::Wmi::{IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WbemLocator};
 use windows::core::{BSTR, HSTRING, PCWSTR};
 
 const CLASS: &str = "DDVWmiMethodFunction";
+/// How long a query may take. Never forever: these run on the thread that publishes
+/// every reading and answers the service manager's stop.
+const WMI_WAIT_MS: i32 = 5000;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Fan {
@@ -50,7 +53,7 @@ pub fn thermal_mode() -> Result<ThermalMode, String> {
             svc.ExecQuery(&BSTR::from("WQL"), &query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, None).map_err(e)?;
         let mut found = [None];
         let mut n = 0;
-        let _ = rows.Next(WBEM_INFINITE, &mut found, &mut n);
+        let _ = rows.Next(WMI_WAIT_MS, &mut found, &mut n);
         let row = found[0].take().ok_or("BIOS: no ThermalManagement attribute")?;
         let current = strings_prop(&row, "CurrentValue").into_iter().next().ok_or("BIOS: no current value")?;
         Ok(ThermalMode { current, options: strings_prop(&row, "PossibleValue") })
@@ -81,7 +84,7 @@ impl Ddv {
                 .map_err(e("query"))?;
             let mut found = [None];
             let mut n = 0;
-            let _ = rows.Next(WBEM_INFINITE, &mut found, &mut n);
+            let _ = rows.Next(WMI_WAIT_MS, &mut found, &mut n);
             let instance = found[0].take().ok_or("DDV: not present on this machine")?;
             let path = string_prop(&instance, "__PATH").ok_or("DDV: no instance path")?;
 
