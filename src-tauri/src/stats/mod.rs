@@ -61,6 +61,9 @@ pub struct Control {
     /// Peripherals picked for the taskbar (ids), and whether the item is on it.
     pub devices: RwLock<Vec<String>>,
     pub devices_on: AtomicBool,
+    /// Device ids replaced by another id of the same device (old, new): the app moves
+    /// the pick in the settings and empties this.
+    pub devices_moved: parking_lot::Mutex<Vec<(String, String)>>,
 }
 
 #[derive(Default, Clone)]
@@ -74,8 +77,12 @@ pub struct FanPrefs {
 pub fn spawn(store: Shared, control: Arc<Control>, peripherals_file: Option<std::path::PathBuf>, on_tick: impl Fn(&Snapshot) + Send + 'static) {
     let devices = Arc::new(RwLock::new(peripherals::Peripherals::load(peripherals_file)));
     {
-        let control = control.clone();
-        peripherals::spawn_poller(devices.clone(), move || control.devices_on.load(Ordering::Relaxed) || control.settings_open.load(Ordering::Relaxed));
+        let (control, mover) = (control.clone(), control.clone());
+        peripherals::spawn_poller(
+            devices.clone(),
+            move || control.devices_on.load(Ordering::Relaxed) || control.settings_open.load(Ordering::Relaxed),
+            move |moved| mover.devices_moved.lock().extend(moved),
+        );
     }
     std::thread::Builder::new()
         .name("sampler".into())
@@ -91,7 +98,7 @@ fn run(store: Shared, control: Arc<Control>, devices: Arc<RwLock<peripherals::Pe
     let cpu = cpu::CpuCollector::new(&q);
     let mem = mem::MemCollector::new(&q);
     let mut disk = disk::DiskCollector::new(&q);
-    let gpu = gpu::GpuCollector::new(&q);
+    let mut gpu = gpu::GpuCollector::new(&q);
     let mut npu = npu::NpuCollector::new(&q);
     let sensor = sensors::SensorCollector::new(&q);
     let mut net = net::NetCollector::new();
@@ -230,7 +237,7 @@ mod tests {
         let cpu = cpu::CpuCollector::new(&q);
         let mem = mem::MemCollector::new(&q);
         let mut disk = disk::DiskCollector::new(&q);
-        let gpu = gpu::GpuCollector::new(&q);
+        let mut gpu = gpu::GpuCollector::new(&q);
         let mut procs = procs::ProcCollector::new();
         q.collect();
         procs.sample();

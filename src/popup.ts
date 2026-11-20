@@ -2,7 +2,7 @@
 // item is clicked. Rust positions and shows the window once we report our height.
 
 import "./styles/popup.css";
-import { connect, inTauri, type State } from "./data";
+import { connect, inTauri, refresh, type State } from "./data";
 import type { Module } from "./modules/common";
 import { MODULES } from "./modules";
 import { onLanguageChange } from "./i18n";
@@ -58,8 +58,10 @@ connect((s) => {
 
 if (inTauri) {
   import("@tauri-apps/api/event").then(({ listen }) => {
-    listen<{ module: ModuleId; theme?: string }>("popup:show", (e) => {
+    listen<{ module: ModuleId; theme?: string }>("popup:show", async (e) => {
       if (e.payload.theme) document.documentElement.dataset.theme = e.payload.theme;
+      // Nothing arrived while the window was hidden: catch up before drawing.
+      await refresh().catch(console.error);
       show(e.payload.module);
     });
   });

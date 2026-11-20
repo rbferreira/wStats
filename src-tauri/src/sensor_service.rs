@@ -40,9 +40,10 @@ pub struct Status {
 
 fn binary() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    [exe_dir.join("wstats-sensors.exe"), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sensors/target/release/wstats-sensors.exe")]
-        .into_iter()
-        .find(|p| p.exists())
+    // The checkout's build only counts in a debug build: a release must never elevate
+    // something from a path that is not its own folder.
+    let dev = cfg!(debug_assertions).then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sensors/target/release/wstats-sensors.exe"));
+    std::iter::once(exe_dir.join("wstats-sensors.exe")).chain(dev).find(|p| p.exists())
 }
 
 fn service_state() -> Option<u32> {

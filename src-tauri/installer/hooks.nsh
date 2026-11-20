@@ -5,8 +5,15 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   ; Start with Windows. Also replaces a stale path (a development build, an old folder).
+  ; Not when the user turned it off in wStats (Autostart = 0): installing an update over
+  ; the old version would switch it back on.
   ${If} $UpdateMode <> 1
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" "$INSTDIR\${MAINBINARYNAME}.exe"
+    ClearErrors
+    ReadRegDWORD $0 HKCU "Software\wStats" "Autostart"
+    ${If} ${Errors}
+    ${OrIf} $0 <> 0
+      WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" "$INSTDIR\${MAINBINARYNAME}.exe"
+    ${EndIf}
   ${EndIf}
 
   ; Sensors. Already set up (an update): refresh the service. First install: ask, yes by
@@ -47,6 +54,7 @@
     ${If} $DeleteAppDataCheckboxState = 1
       SetShellVarContext current
       RMDir /r /REBOOTOK "$LOCALAPPDATA\wStats"
+      DeleteRegKey HKCU "Software\wStats"
     ${EndIf}
 
     ; PawnIO is shared with other tools, so it stays unless asked otherwise.

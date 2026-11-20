@@ -42,6 +42,20 @@ pub fn reg_dword(root: HKEY, subkey: &str, value: &str) -> Option<u32> {
     rc.is_ok().then_some(v)
 }
 
+/// Records that the user turned "Start with Windows" off, where the installer looks
+/// before writing the entry again on an update. Turning it on removes the record.
+pub fn remember_autostart(enabled: bool) {
+    let (key, value) = (HSTRING::from(r"Software\wStats"), HSTRING::from("Autostart"));
+    unsafe {
+        if enabled {
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &key, &value);
+        } else {
+            let off = 0u32;
+            let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &key, &value, REG_DWORD.0, Some((&off as *const u32).cast()), 4);
+        }
+    }
+}
+
 /// Whether the taskbar uses the light theme (`SystemUsesLightTheme`).
 pub fn taskbar_is_light() -> bool {
     reg_dword(

@@ -118,6 +118,7 @@ pub struct Settings {
     /// GDI device name of the monitor whose taskbar hosts the strip; `None` = primary.
     pub monitor: Option<String>,
     /// Strip items, left to right. A module missing here is hidden.
+    #[serde(deserialize_with = "known_modules")]
     pub modules: Vec<ModuleId>,
     pub interval_ms: u32,
     pub theme: Theme,
@@ -206,22 +207,55 @@ impl Settings {
         true
     }
 
+    /// A picked device now known by another id (old, new) stays picked. Returns whether
+    /// the settings changed.
+    pub fn move_devices(&mut self, moved: &[(String, String)]) -> bool {
+        let before = self.devices.clone();
+        for (old, new) in moved {
+            if let Some(at) = self.devices.iter().position(|d| d == old) {
+                if self.devices.contains(new) {
+                    self.devices.remove(at);
+                } else {
+                    self.devices[at] = new.clone();
+                }
+            }
+        }
+        self.devices != before
+    }
+
     pub fn load(path: &PathBuf) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Ok(text) = std::fs::read_to_string(path) else { return Self::default() };
+        match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                // The next save writes the defaults over it: keep what the user had.
+                let kept = path.with_extension("json.bad");
+                log::warn!("settings: {} is unreadable ({e}); kept as {}", path.display(), kept.display());
+                let _ = std::fs::copy(path, kept);
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self, path: &PathBuf) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        // Write-then-rename so a crash never leaves a half-written file behind.
+        // Write-then-rename so a crash never leaves a half-written file behind. Saves
+        // come from more than one thread and share the temporary file.
+        static SAVING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let _one = SAVING.lock();
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
         std::fs::rename(tmp, path)
     }
+}
+
+/// The items this build knows. A file written by a newer wStats may name others; they
+/// are skipped instead of costing every setting.
+fn known_modules<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ModuleId>, D::Error> {
+    let raw = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(raw.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
 }
 
 #[cfg(test)]
@@ -261,6 +295,22 @@ mod tests {
         assert_eq!(s.modules, vec![ModuleId::Cpu, ModuleId::Mem]);
         assert_eq!(s.interval_ms, 1000);
         assert_eq!(s.label, Label::Top);
+    }
+
+    #[test]
+    fn items_from_a_newer_version_are_skipped() {
+        let s: Settings = serde_json::from_str(r#"{"modules":["cpu","hologram","net"],"intervalMs":2000}"#).unwrap();
+        assert_eq!(s.modules, vec![ModuleId::Cpu, ModuleId::Net]);
+        assert_eq!(s.interval_ms, 2000);
+    }
+
+    #[test]
+    fn a_picked_device_follows_its_new_id() {
+        let mut s = Settings { devices: vec!["bt:a".into(), "lg:x".into(), "bt:b".into()], ..Default::default() };
+        let moved = [("bt:a".to_string(), "gi:a".to_string()), ("bt:b".to_string(), "lg:x".to_string()), ("bt:zz".to_string(), "lg:y".to_string())];
+        assert!(s.move_devices(&moved));
+        assert_eq!(s.devices, vec!["gi:a".to_string(), "lg:x".to_string()]);
+        assert!(!s.move_devices(&moved));
     }
 
     #[test]

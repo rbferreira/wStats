@@ -17,6 +17,7 @@ const UNKNOWN: u8 = 255;
 const INFO_REFRESH: Duration = Duration::from_secs(60);
 /// `BATTERY_UNKNOWN_RATE` / `BATTERY_UNKNOWN_VOLTAGE`.
 const UNKNOWN_RATE: i32 = i32::MIN;
+const REOPEN_EVERY: Duration = Duration::from_secs(30);
 
 struct Device {
     handle: HANDLE,
@@ -27,13 +28,16 @@ pub struct BatteryCollector {
     device: Option<Device>,
     info: Option<BATTERY_INFORMATION>,
     info_at: Option<Instant>,
+    /// The driver stopped answering: the battery was enumerated again and has a new tag.
+    lost: bool,
+    opened_at: Instant,
 }
 
 unsafe impl Send for BatteryCollector {}
 
 impl BatteryCollector {
     pub fn new() -> Self {
-        Self { device: open_first_battery(), info: None, info_at: None }
+        Self { device: open_first_battery(), info: None, info_at: None, lost: false, opened_at: Instant::now() }
     }
 
     pub fn sample(&mut self) -> Option<Battery> {
@@ -51,6 +55,15 @@ impl BatteryCollector {
             ..Default::default()
         };
 
+        // No device (the battery came after wStats) or a dead tag: open it again, unhurried.
+        if (self.device.is_none() || self.lost) && self.opened_at.elapsed() >= REOPEN_EVERY {
+            self.close();
+            self.device = open_first_battery();
+            self.opened_at = Instant::now();
+            self.lost = false;
+            self.info_at = None;
+        }
+
         if let Some(dev) = &self.device {
             if self.info_at.is_none_or(|t| t.elapsed() >= INFO_REFRESH) {
                 self.info = query_info(dev);
@@ -64,23 +77,32 @@ impl BatteryCollector {
                 }
                 b.cycles = (info.CycleCount > 0).then_some(info.CycleCount);
             }
-            if let Some(st) = query_status(dev) {
-                // Positive while charging, negative while discharging, in mW.
-                b.rate_mw = (st.Rate != UNKNOWN_RATE && st.Rate != 0).then_some(st.Rate);
-                b.voltage_mv = (st.Voltage != u32::MAX && st.Voltage > 0).then_some(st.Voltage);
+            match query_status(dev) {
+                Some(st) => {
+                    // Positive while charging, negative while discharging, in mW.
+                    b.rate_mw = (st.Rate != UNKNOWN_RATE && st.Rate != 0).then_some(st.Rate);
+                    b.voltage_mv = (st.Voltage != u32::MAX && st.Voltage > 0).then_some(st.Voltage);
+                }
+                None => self.lost = true,
             }
         }
         Some(b)
     }
 }
 
-impl Drop for BatteryCollector {
-    fn drop(&mut self) {
-        if let Some(d) = &self.device {
+impl BatteryCollector {
+    fn close(&mut self) {
+        if let Some(d) = self.device.take() {
             unsafe {
                 let _ = CloseHandle(d.handle);
             }
         }
+    }
+}
+
+impl Drop for BatteryCollector {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

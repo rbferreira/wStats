@@ -24,7 +24,11 @@ pub struct NpuCollector {
     exes: Exes,
     /// pid -> (exe, display name), looked up once per process.
     seen: HashMap<u32, (String, String)>,
+    looked_at: std::time::Instant,
 }
+
+/// How often the adapter is looked up again: a driver update gives it a new LUID.
+const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl NpuCollector {
     pub fn new(q: &Query) -> Self {
@@ -36,10 +40,24 @@ impl NpuCollector {
             npu,
             exes: Exes::new(),
             seen: HashMap::new(),
+            looked_at: std::time::Instant::now(),
         }
     }
 
     pub fn sample(&mut self, q: &Query) -> Option<Npu> {
+        if self.looked_at.elapsed() >= LOOK_EVERY {
+            self.looked_at = std::time::Instant::now();
+            let npu = find();
+            if npu != self.npu {
+                log::info!("npu: the adapter changed, following it");
+                self.npu = npu;
+            }
+            // An NPU that came after wStats (its driver installed meanwhile).
+            if self.npu.is_some() && self.engines.is_none() {
+                self.engines = q.add(r"\GPU Engine(*)\Utilization Percentage");
+                self.shared = q.add(r"\GPU Adapter Memory(*)\Shared Usage");
+            }
+        }
         let (name, luid) = self.npu.clone()?;
         let mine = |instance: &str| luid_of(instance).as_deref() == Some(luid.as_str());
 

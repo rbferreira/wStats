@@ -25,6 +25,8 @@ const DOWNLOADS: &str = "https://github.com/rbferreira/wStats/releases/download/
 const RELEASES: &str = "https://github.com/rbferreira/wStats/releases/";
 const FIRST_CHECK: Duration = Duration::from_secs(60);
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often the thread looks at the clock.
+const POLL: Duration = Duration::from_secs(10 * 60);
 /// The API's answer is a few KB.
 const MAX_JSON: usize = 1 << 20;
 
@@ -79,11 +81,16 @@ impl Updater {
         let bg = me.clone();
         let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
             std::thread::sleep(FIRST_CHECK);
+            // By the wall clock: a sleeping thread does not count the hours the machine
+            // spends suspended, and a laptop would go days between checks.
+            let mut last: Option<SystemTime> = None;
             loop {
-                if bg.enabled.load(Ordering::Relaxed) {
+                let due = last.is_none_or(|t| SystemTime::now().duration_since(t).map_or(true, |d| d >= EVERY));
+                if due && bg.enabled.load(Ordering::Relaxed) {
                     bg.check();
+                    last = Some(SystemTime::now());
                 }
-                std::thread::sleep(EVERY);
+                std::thread::sleep(POLL);
             }
         });
         me
