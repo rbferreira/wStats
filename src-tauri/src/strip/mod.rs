@@ -41,6 +41,8 @@ const WM_APP_REFRESH: u32 = WM_APP + 1;
 /// `Settings::monitor` value meaning "every monitor".
 pub const ALL_MONITORS: &str = "*";
 const TIMER_PLACE: usize = 1;
+/// Runs only while Explorer has an attach to answer.
+const TIMER_ATTACH: usize = 2;
 /// After an Explorer restart its XAML needs a moment before it accepts the TAP.
 const REATTACH_EVERY: Duration = Duration::from_secs(3);
 const MAX_ATTACH_FAILURES: u32 = 5;
@@ -99,9 +101,32 @@ impl Shared {
 }
 
 enum Mode {
-    Xaml { surface: xaml::Surface, last_beat: i32, beat_at: Instant, failures: u32, core_mtime: Option<std::time::SystemTime> },
+    Xaml {
+        surface: xaml::Surface,
+        last_beat: i32,
+        beat_at: Instant,
+        failures: u32,
+        core_mtime: Option<std::time::SystemTime>,
+        /// Explorer was asked for the element and has not answered yet.
+        attaching: Option<Attaching>,
+    },
     /// One window per taskbar shown on; the scanner finds the free gap on each.
     Window { bars: Vec<Bar>, scanner: Option<taskbar::Scanner> },
+}
+
+struct Attaching {
+    wait: xaml::Attach,
+    miss: Miss,
+}
+
+/// What to do when Explorer does not give us the element.
+enum Miss {
+    /// At start: use the fallback window.
+    Fallback,
+    /// Already in XAML mode (Explorer restarted, a new core): count it, try again later.
+    Count,
+    /// A retry from the fallback window: go back to these windows, kept meanwhile.
+    Restore(Box<Mode>),
 }
 
 /// The fallback window on one taskbar. Each has its own layout and renderer: the
@@ -303,66 +328,108 @@ impl State {
     fn start(&mut self) {
         self.measure();
         // WSTATS_STRIP=window skips the XAML route, to exercise the fallback.
-        let forced = std::env::var("WSTATS_STRIP").is_ok_and(|v| v == "window");
-        if forced || !self.try_xaml() {
+        if std::env::var("WSTATS_STRIP").is_ok_and(|v| v == "window") {
             self.fallback_to_window();
+        } else {
+            self.try_xaml(Miss::Fallback);
         }
     }
 
-    /// Switches to XAML mode and attaches; false (mode left as XAML) when it fails.
-    fn try_xaml(&mut self) -> bool {
+    /// Switches to XAML mode and asks Explorer for the element. The answer comes later,
+    /// in `poll_attach`; `miss` says what to do if it is a no.
+    fn try_xaml(&mut self, miss: Miss) {
         let left = *self.shared.position.read() == Position::Left;
         match xaml::Surface::create(self.host, left) {
             Ok(surface) => {
-                self.mode = Mode::Xaml { surface, last_beat: 0, beat_at: Instant::now(), failures: 0, core_mtime: xaml::core_source_mtime() };
+                self.mode = Mode::Xaml { surface, last_beat: 0, beat_at: Instant::now(), failures: 0, core_mtime: xaml::core_source_mtime(), attaching: None };
                 self.layout();
                 self.paint();
-                self.attach_xaml()
+                self.begin_attach(miss);
             }
             Err(e) => {
                 log::warn!("shared memory: {e:?}");
-                false
+                self.missed(miss);
             }
         }
     }
 
     /// On the fallback window: Explorer may accept the element now (it was restarted, or
-    /// a stuck reload cleared). Keeps the window unless the switch works.
+    /// a stuck reload cleared). The windows stay up until the switch works.
     fn retry_xaml(&mut self) {
         if !matches!(self.mode, Mode::Window { .. }) {
             return;
         }
         let window = std::mem::replace(&mut self.mode, Mode::Window { bars: Vec::new(), scanner: None });
-        if self.try_xaml() {
-            drop(window); // destroys the windows
-            self.xaml_retry_every = RETRY_XAML.0;
-            self.update(true);
-        } else {
-            self.mode = window;
-            self.xaml_retry_every = (self.xaml_retry_every * 2).min(RETRY_XAML.1);
-        }
+        self.try_xaml(Miss::Restore(Box::new(window)));
     }
 
-    /// Injects or reloads the TAP and waits until Explorer shows our element.
-    fn attach_xaml(&mut self) -> bool {
-        let Mode::Xaml { surface, last_beat, beat_at, failures, .. } = &mut self.mode else { return false };
-        match surface.attach() {
-            Ok(true) => {
-                *last_beat = surface.heartbeat();
-                *beat_at = Instant::now();
-                *failures = 0;
-                log::info!("strip: hosted in the taskbar's XAML");
-                true
-            }
-            Ok(false) => {
-                log::warn!("xaml: no element (heartbeat {}, attached {})", surface.heartbeat(), surface.attached());
-                *failures += 1;
-                false
+    /// Injects or reloads the TAP. Does not wait for Explorer: a timer polls the answer,
+    /// so the strip keeps serving its windows meanwhile.
+    fn begin_attach(&mut self, miss: Miss) {
+        let Mode::Xaml { surface, attaching, .. } = &mut self.mode else { return };
+        match surface.begin_attach() {
+            Ok(wait) => {
+                *attaching = Some(Attaching { wait, miss });
+                unsafe {
+                    SetTimer(Some(self.host), TIMER_ATTACH, 100, None);
+                }
             }
             Err(e) => {
                 log::warn!("xaml attach: {e}");
-                *failures += 1;
-                false
+                self.missed(miss);
+            }
+        }
+    }
+
+    /// Timer, while an attach is pending: has Explorer shown our element yet?
+    fn poll_attach(&mut self) {
+        let answer = match &mut self.mode {
+            Mode::Xaml { surface, attaching, last_beat, beat_at, failures, .. } => match attaching.as_ref().map(|a| surface.poll_attach(&a.wait)) {
+                Some(None) => return, // still time
+                Some(Some(ok)) => {
+                    if ok {
+                        *last_beat = surface.heartbeat();
+                        *beat_at = Instant::now();
+                        *failures = 0;
+                        log::info!("strip: hosted in the taskbar's XAML");
+                    } else {
+                        log::warn!("xaml: no element (heartbeat {}, attached {})", surface.heartbeat(), surface.attached());
+                    }
+                    attaching.take().map(|a| (ok, a.miss))
+                }
+                None => None,
+            },
+            Mode::Window { .. } => None,
+        };
+        unsafe {
+            let _ = KillTimer(Some(self.host), TIMER_ATTACH);
+        }
+        match answer {
+            Some((true, Miss::Restore(windows))) => {
+                drop(windows); // destroys the fallback windows
+                self.xaml_retry_every = RETRY_XAML.0;
+                self.update(true);
+            }
+            Some((true, _)) | None => {}
+            Some((false, miss)) => self.missed(miss),
+        }
+    }
+
+    /// Explorer did not give us the element.
+    fn missed(&mut self, miss: Miss) {
+        match miss {
+            Miss::Fallback => self.fallback_to_window(),
+            Miss::Count => {
+                if let Mode::Xaml { failures, beat_at, .. } = &mut self.mode {
+                    *failures += 1;
+                    *beat_at = Instant::now();
+                }
+            }
+            Miss::Restore(windows) => {
+                self.mode = *windows;
+                self.xaml_retry_every = (self.xaml_retry_every * 2).min(RETRY_XAML.1);
+                self.xaml_retry_at = Instant::now();
+                self.update(true);
             }
         }
     }
@@ -440,29 +507,29 @@ impl State {
 
     /// Timer: watches the TAP's heartbeat (XAML) or the free gap (window).
     fn tick(&mut self) {
-        if let Mode::Xaml { surface, last_beat, beat_at, failures, core_mtime } = &mut self.mode {
-            // Debug builds: a rebuilt core is swapped into Explorer without restarting it.
-            if cfg!(debug_assertions) {
-                let mtime = xaml::core_source_mtime();
-                if mtime != *core_mtime {
-                    *core_mtime = mtime;
-                    log::info!("strip: core DLL changed, reloading it in Explorer");
-                    self.attach_xaml();
-                    return;
+        if let Mode::Xaml { surface, last_beat, beat_at, failures, core_mtime, attaching } = &mut self.mode {
+            if attaching.is_some() {
+                // Explorer is being asked; `poll_attach` has it.
+            } else if cfg!(debug_assertions) && xaml::core_source_mtime() != *core_mtime {
+                // Debug builds: a rebuilt core is swapped into Explorer without restarting it.
+                *core_mtime = xaml::core_source_mtime();
+                log::info!("strip: core DLL changed, reloading it in Explorer");
+                self.begin_attach(Miss::Count);
+                return;
+            } else {
+                let beat = surface.heartbeat();
+                if beat != *last_beat {
+                    *last_beat = beat;
+                    *beat_at = Instant::now();
+                } else if beat_at.elapsed() > REATTACH_EVERY {
+                    // Explorer restarted (or our code there died): bring it back.
+                    *beat_at = Instant::now();
+                    if *failures >= MAX_ATTACH_FAILURES {
+                        self.fallback_to_window();
+                        return;
+                    }
+                    self.begin_attach(Miss::Count);
                 }
-            }
-            let beat = surface.heartbeat();
-            if beat != *last_beat {
-                *last_beat = beat;
-                *beat_at = Instant::now();
-            } else if beat_at.elapsed() > REATTACH_EVERY {
-                // Explorer restarted (or our code there died): bring it back.
-                *beat_at = Instant::now();
-                if *failures >= MAX_ATTACH_FAILURES {
-                    self.fallback_to_window();
-                    return;
-                }
-                self.attach_xaml();
             }
         } else if self.xaml_retry_at.elapsed() > self.xaml_retry_every && std::env::var_os("WSTATS_STRIP").is_none() {
             self.retry_xaml();
@@ -481,6 +548,8 @@ impl State {
         match &mut self.mode {
             Mode::Xaml { surface, .. } => {
                 if self.width == 0 {
+                    // Nothing to show: say so, or Explorer keeps the last frame and its room.
+                    surface.clear();
                     return;
                 }
                 let frame = style.frame(&self.slots, self.width, self.height, self.scale, self.hover);
@@ -674,7 +743,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             LRESULT(0)
         }
         WM_TIMER => {
-            with_state(|s| s.tick());
+            with_state(|s| if wp.0 == TIMER_ATTACH { s.poll_attach() } else { s.tick() });
             LRESULT(0)
         }
         xaml::MSG_POINTER => {
