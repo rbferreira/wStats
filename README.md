@@ -23,13 +23,13 @@ wStats puts small graphs of **CPU, GPU, NPU, memory, disk, network, battery, tem
 
 What sets it apart from other monitors is that **wStats is part of the taskbar**: it does not float on top of it. App icons make room for it the way they do for the Widgets button, and everything reflows when you turn an item on or off.
 
-And it fits your taste: **each item's name goes above, below, beside (on the left or the right) or nowhere**, and with no name line the number grows to fill the bar. The graphics can be turned off too, leaving the text alone.
+And it fits your taste: **each item's name goes above, below, beside (on the left or the right) or nowhere**, and with no name line the number grows to fill the bar. The graphics can be turned off too, leaving the text alone. The narrowest look puts **the number inside its graphic**: in the memory and disk rings, over the CPU, GPU and network history, with the name under it.
 
 <div align="center">
 <img src="docs/img/labels.png" alt="The four ways to show the labels: above, below, beside and none" width="100%">
 </div>
 
-For a lighter taskbar, the **compact mode** puts two items per column, numbers only, each tagged by an icon or its name, on the left or the right. All ten items fit in less than half the space, and each number still opens its panel.
+For a lighter taskbar, the **compact mode** puts two items per column, numbers only, each tagged by an icon, its name or a small live graphic, on the left or the right. All ten items fit in less than half the space, and each number still opens its panel.
 
 <div align="center">
 <img src="docs/img/compact.png" alt="Compact mode in its four combinations: icon or label, on the left or the right" width="60%">
@@ -63,8 +63,8 @@ Also:
 - **Light and dark themes**, following Windows or fixed, with both graph colours configurable.
 - **24 hours of history** as one-minute averages, kept across restarts (Now / 1 h / 24 h on every graph).
 - **Position** next to the Widgets button (between the weather and Start) or next to the tray, on a chosen monitor or on all of them.
-- **Labels your way**: above, below, beside or none, with a live preview in Settings. The graphics can be turned off, leaving the text alone.
-- **Compact mode**: two items per column, numbers only, tagged by icon or label, on the left or the right. Takes less than half the space.
+- **Labels your way**: above, below, beside, none, or the number inside its graphic, with a live preview in Settings. The graphics can be turned off, leaving the text alone.
+- **Compact mode**: two items per column, numbers only, tagged by icon, label or mini graphic, on the left or the right. Takes less than half the space.
 - **Item order** set by dragging in Settings.
 - **English and Portuguese**, following the Windows language or chosen in Settings; the installer is bilingual too.
 - **Save memory**: unloads the panels after a minute unused, and wStats drops to about 18 MB (with the panels always ready it sits around 110 MB, almost all of it WebView2).

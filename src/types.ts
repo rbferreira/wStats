@@ -227,7 +227,7 @@ export type ModuleId = "cpu" | "gpu" | "mem" | "net" | "disk" | "battery" | "tem
 export type Theme = "auto" | "dark" | "light";
 export type Position = "left" | "right";
 /** Where each taskbar item's name goes relative to its value. */
-export type Label = "top" | "bottom" | "side" | "none";
+export type Label = "top" | "bottom" | "side" | "none" | "inside";
 
 export interface Settings {
   position: Position;
@@ -245,7 +245,7 @@ export interface Settings {
   graphics: boolean;
   /** Two items per column, numbers only, tagged by an icon or the name. */
   compact: boolean;
-  compactTag: "icon" | "label";
+  compactTag: "icon" | "label" | "graphic";
   /** Where the name goes: the compact tag, and the stacked letters of "beside". */
   side: "left" | "right";
   /** The NPU item was added once on this machine (Rust decides; kept as is). */

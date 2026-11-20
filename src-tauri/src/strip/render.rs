@@ -86,6 +86,7 @@ struct Fonts {
     compact_value: IDWriteTextFormat,
     compact_unit: IDWriteTextFormat,
     compact_tag: IDWriteTextFormat,
+    inside: IDWriteTextFormat,
 }
 
 /// Which of the [`Fonts`] a piece of text uses.
@@ -103,6 +104,7 @@ enum Font {
     CompactValue,
     CompactUnit,
     CompactTag,
+    Inside,
 }
 
 impl Fonts {
@@ -131,6 +133,8 @@ impl Fonts {
             compact_value: normal(13.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             compact_unit: normal(8.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             compact_tag: normal(8.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+            // A number inside a ring: the condensed cut keeps "100" within it.
+            inside: tall(11.5)?,
         };
         unsafe {
             for f in [
@@ -148,6 +152,7 @@ impl Fonts {
                 &fonts.compact_value,
                 &fonts.compact_unit,
                 &fonts.compact_tag,
+                &fonts.inside,
             ] {
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
             }
@@ -169,6 +174,7 @@ impl Fonts {
             Font::CompactValue => &self.compact_value,
             Font::CompactUnit => &self.compact_unit,
             Font::CompactTag => &self.compact_tag,
+            Font::Inside => &self.inside,
         }
     }
 }
@@ -276,7 +282,7 @@ fn lines(m: ModuleId, label: Label, reading: &Reading) -> Vec<Line> {
     let line = |baseline, parts| Line { baseline, parts };
     match (label, reading) {
         (Label::Top, _) => vec![line(20.0, caption()), line(37.0, value())],
-        (Label::Bottom, _) => vec![line(25.0, value()), line(38.0, caption())],
+        (Label::Bottom | Label::Inside, _) => vec![line(25.0, value()), line(38.0, caption())],
         // No name line: each rate gets a line of its own, with its unit.
         (Label::Side | Label::None, Reading::Rates { up, down, unit }) => {
             let (font, first, second) = if big { (Font::BigLine, 21.5, 37.5) } else { (Font::Line, 20.0, 35.0) };
@@ -327,13 +333,63 @@ fn measure<T>(s: f32, f: impl FnOnce(&IDWriteFactory, &Fonts) -> T) -> Option<T>
     })
 }
 
+/// How an item is drawn with the number inside its graphic (`Label::Inside`): over its
+/// history graph, in its ring, or (no room in the graphic) as with the name below.
+#[derive(Clone, Copy, PartialEq)]
+enum Inside {
+    Graph,
+    Ring,
+    No,
+}
+
+fn inside(m: ModuleId, look: Look) -> Inside {
+    if look.label != Label::Inside || !look.graphics {
+        return Inside::No;
+    }
+    match m {
+        ModuleId::Cpu | ModuleId::Gpu | ModuleId::Npu | ModuleId::Net => Inside::Graph,
+        ModuleId::Mem | ModuleId::Disk => Inside::Ring,
+        _ => Inside::No,
+    }
+}
+
+/// Ring of an item drawn inside: centre height and outer radius. Like every graphic it
+/// stays within 8..40 of the 48-DIP design, what a small taskbar (32 DIPs) shows.
+const RING_CY: f32 = 19.0;
+const RING_OUTER: f32 = 11.0;
+/// Room left and right of the text over a history graph, DIPs.
+const GRAPH_TEXT_PAD: f32 = 1.0;
+
+/// The reading drawn over a history graph. Its item is sized for "99 %": a hundred drops
+/// the "%", as in the rings, and takes the same room.
+fn over_graph(reading: Reading) -> Reading {
+    match reading {
+        Reading::Value { value, unit } if unit == "%" && value.chars().filter(char::is_ascii_digit).count() >= 3 => Reading::Value { value, unit: "" },
+        r => r,
+    }
+}
+
 /// Width of an item's content (stacked letters, graphic, text), in device pixels.
 fn content_width(m: ModuleId, look: Look, s: f32) -> f32 {
     let key = (m, look.label as u8 | (look.graphics as u8) << 4, s.to_bits());
     if let Some(w) = WIDTHS.with(|c| c.borrow().get(&key).copied()) {
         return w;
     }
-    let text = measure(s, |dwrite, fonts| lines(m, look.label, &widest(m)).iter().map(|l| line_width(dwrite, fonts, l, s)).fold(0.0, f32::max));
+    let sample = match (inside(m, look), widest(m)) {
+        (Inside::Graph, Reading::Value { unit: "%", .. }) => Reading::Value { value: "99".into(), unit: "%" },
+        (_, r) => r,
+    };
+    let text = measure(s, |dwrite, fonts| lines(m, look.label, &sample).iter().map(|l| line_width(dwrite, fonts, l, s)).fold(0.0, f32::max));
+    let w = match inside(m, look) {
+        Inside::Graph => Some(text.unwrap_or(40.0 * s) + 2.0 * GRAPH_TEXT_PAD * s),
+        // The caption is the widest thing under a ring.
+        Inside::Ring => Some((2.0 * RING_OUTER * s).max(measure(s, |dwrite, fonts| line_width(dwrite, fonts, &Line { baseline: 0.0, parts: vec![part(0.0, name(m), Font::Caption, 1.0)] }, s)).unwrap_or(0.0))),
+        Inside::No => None,
+    };
+    if let Some(w) = w {
+        WIDTHS.with(|c| c.borrow_mut().insert(key, w));
+        return w;
+    }
     let letters = if look.label == Label::Side { 12.0 } else { 0.0 };
     let graphic = if look.graphics { graphic_width(m) + 6.0 } else { 0.0 };
     let w = (letters + graphic + 1.0) * s + text.unwrap_or(40.0 * s);
@@ -353,6 +409,9 @@ const ICON: f32 = 12.0;
 const TOP_BASE: f32 = 20.5;
 const BOTTOM_BASE: f32 = 37.5;
 const FULL_BASE: f32 = 29.5;
+/// The `Tag::Graphic` tags: height (and width, but for history graphs: `MINI_GRAPH`).
+const MINI: f32 = 13.0;
+const MINI_GRAPH: f32 = 16.0;
 
 fn columns(modules: &[ModuleId]) -> Vec<Vec<ModuleId>> {
     let mut cols: Vec<Vec<ModuleId>> = Vec::new();
@@ -379,7 +438,10 @@ fn compact_widths(m: ModuleId, tag: Tag, s: f32) -> (f32, f32) {
     measure(s, |dwrite, fonts| {
         let w = |parts: Vec<Part>| line_width(dwrite, fonts, &Line { baseline: 0.0, parts }, s);
         let tag_w = match (m, tag) {
+            (ModuleId::Net, Tag::Graphic) => (MINI_GRAPH + 2.0) * s + w(vec![part(0.0, "↑", Font::Arrow, 1.0)]),
             (ModuleId::Net, _) => w(vec![part(0.0, "↑", Font::Arrow, 1.0)]),
+            (ModuleId::Cpu | ModuleId::Gpu, Tag::Graphic) => MINI_GRAPH * s,
+            (_, Tag::Graphic) => MINI * s,
             (_, Tag::Icon) => ICON * s,
             (_, Tag::Label) => w(vec![part(0.0, name(m), Font::CompactTag, 1.0)]),
         };
@@ -427,6 +489,17 @@ pub struct Renderer {
 
 pub const ITEM_PAD: f32 = 5.0;
 pub const ITEM_GAP: f32 = 2.0;
+/// Padding of the items in the "inside" look, the narrow one: 8 DIPs between items.
+const INSIDE_PAD: f32 = 3.0;
+
+/// Room left and right of an item's content, DIPs.
+fn item_pad(look: Look) -> f32 {
+    if look.label == Label::Inside && look.graphics && !look.compact {
+        INSIDE_PAD
+    } else {
+        ITEM_PAD
+    }
+}
 
 pub fn layout(modules: &[ModuleId], look: Look, scale: f32) -> (Vec<Slot>, i32) {
     if look.compact {
@@ -438,7 +511,7 @@ pub fn layout(modules: &[ModuleId], look: Look, scale: f32) -> (Vec<Slot>, i32) 
         if i > 0 {
             x += ITEM_GAP * scale;
         }
-        let w = (content_width(m, look, scale) + 2.0 * ITEM_PAD * scale).round();
+        let w = (content_width(m, look, scale) + 2.0 * item_pad(look) * scale).round();
         slots.push(Slot { module: m, x: x.round() as i32, w: w as i32, row: Row::Full, tag_w: 0.0, num_w: 0.0 });
         x += w;
     }
@@ -584,10 +657,11 @@ impl Renderer {
                     };
                     ctx.round_rect(x, top, slot.w as f32, bottom - top, 5.0 * s, fg.alpha(a));
                 }
-                let left = x + ITEM_PAD * s;
-                let width = slot.w as f32 - 2.0 * ITEM_PAD * s;
+                let pad = if frame.look.compact { ITEM_PAD } else { item_pad(frame.look) };
+                let left = x + pad * s;
+                let width = slot.w as f32 - 2.0 * pad * s;
                 if frame.look.compact {
-                    ctx.compact(slot, left, &store.snapshot);
+                    ctx.compact(slot, left, &store.snapshot, &store.history);
                 } else {
                     ctx.item(slot.module, left, width, &store.snapshot, &store.history);
                 }
@@ -743,20 +817,45 @@ impl Ctx<'_> {
         x + 8.0 * s
     }
 
-    /// Mini bar graph in a rounded box; `layers` stack bottom-up, values 0..=max.
-    fn graph(&self, x: f32, w: f32, layers: &[(Vec<f32>, Rgba)], max: f32) {
+    /// Bar width, gap, padding and count of a history graph `w` wide. In its box the bars
+    /// keep off the edges; without it they run edge to edge, so that the graph is as wide
+    /// as its item and items keep the spacing of the rest.
+    fn bars(&self, w: f32, frame: bool) -> (f32, f32, f32, usize) {
         let s = self.s;
-        let h = 30.0 * s;
-        let y = (self.h - h) / 2.0;
-        self.round_rect(x, y, w, h, 3.0 * s, self.fg.alpha(0.1));
-        let pad = (1.5 * s).round();
         let bar = (1.5 * s).round().max(1.0);
         let gap = (0.5 * s).round().max(1.0);
+        let pad = if frame { (1.5 * s).round() } else { 0.0 };
+        let fit = (w - 2.0 * pad + gap) / (bar + gap);
+        (bar, gap, pad, if frame { fit.floor() } else { fit.ceil() } as usize)
+    }
+
+    /// Left edge and width of the bar `back` places from the right; the leftmost one is
+    /// cut at the graph's edge.
+    fn bar_at(&self, x: f32, w: f32, pad: f32, bar: f32, gap: f32, back: usize) -> Option<(f32, f32)> {
+        let bx = (x + w - pad - back as f32 * (bar + gap) + gap).round();
+        let left = bx.max((x + pad).round());
+        let width = bar - (left - bx);
+        (width > 0.0).then_some((left, width))
+    }
+
+    /// Mini bar graph in a rounded box; `layers` stack bottom-up, values 0..=max. Without
+    /// `frame` the box is left out: behind text it reads as a selection.
+    fn graph(&self, x: f32, w: f32, layers: &[(Vec<f32>, Rgba)], max: f32, frame: bool) {
+        let h = 30.0 * self.s;
+        self.graph_in(x, (self.h - h) / 2.0, w, h, layers, max, frame);
+    }
+
+    /// [`Self::graph`] in any box (px).
+    fn graph_in(&self, x: f32, y: f32, w: f32, h: f32, layers: &[(Vec<f32>, Rgba)], max: f32, frame: bool) {
+        let s = self.s;
+        if frame {
+            self.round_rect(x, y, w, h, 3.0 * s, self.fg.alpha(0.1));
+        }
+        let (bar, gap, pad, n) = self.bars(w, frame);
         let inner_h = h - 2.0 * pad;
-        let n = ((w - 2.0 * pad + gap) / (bar + gap)).floor() as usize;
         let base = (y + h - pad).round();
         for i in 0..n {
-            let bx = (x + w - pad - (n - i) as f32 * (bar + gap) + gap).round();
+            let Some((bx, bar)) = self.bar_at(x, w, pad, bar, gap, n - i) else { continue };
             let mut top = base;
             for (data, color) in layers {
                 let k = data.len() as isize - (n - i) as isize;
@@ -770,31 +869,37 @@ impl Ctx<'_> {
                     top -= bh;
                 }
             }
+            // Without its box, an idle graph keeps a baseline: it shows the item's width,
+            // so the spacing reads the same at 0 % as at 100 %.
+            if !frame && top == base {
+                if let Some((_, color)) = layers.first() {
+                    self.rect(bx, base - 1.0, bar, 1.0, *color);
+                }
+            }
         }
     }
 
     /// Mirrored mini graph: `up` grows from the middle upwards, `down` downwards.
-    fn mirror(&self, x: f32, w: f32, up: &[f32], down: &[f32]) {
+    fn mirror(&self, x: f32, w: f32, up: &[f32], down: &[f32], fade: f32, frame: bool) {
         let s = self.s;
         let h = 30.0 * s;
         let y = (self.h - h) / 2.0;
-        self.round_rect(x, y, w, h, 3.0 * s, self.fg.alpha(0.1));
-        let pad = (1.5 * s).round();
-        let bar = (1.5 * s).round().max(1.0);
-        let gap = (0.5 * s).round().max(1.0);
-        let n = ((w - 2.0 * pad + gap) / (bar + gap)).floor() as usize;
+        if frame {
+            self.round_rect(x, y, w, h, 3.0 * s, self.fg.alpha(0.1));
+        }
+        let (bar, gap, pad, n) = self.bars(w, frame);
         let tail = |a: &[f32]| a[a.len().saturating_sub(n)..].to_vec();
         let (u, d) = (tail(up), tail(down));
         let peak = u.iter().chain(&d).fold(64.0f32 * 1024.0, |m: f32, v| m.max(*v));
         let mid = (y + h / 2.0).round();
         let half = h / 2.0 - pad;
         for i in 0..n {
-            let bx = (x + w - pad - (n - i) as f32 * (bar + gap) + gap).round();
+            let Some((bx, bar)) = self.bar_at(x, w, pad, bar, gap, n - i) else { continue };
             let get = |a: &Vec<f32>| a.len().checked_sub(n - i).map(|k| a[k]).unwrap_or(0.0);
             let hu = (get(&u) / peak * half).round().max(1.0);
             let hd = (get(&d) / peak * half).round().max(1.0);
-            self.rect(bx, mid - hu, bar, hu, self.secondary);
-            self.rect(bx, mid, bar, hd, self.primary);
+            self.rect(bx, mid - hu, bar, hu, self.secondary.alpha(fade));
+            self.rect(bx, mid, bar, hd, self.primary.alpha(fade));
         }
     }
 
@@ -1064,6 +1169,11 @@ impl Ctx<'_> {
             self.draw_lines(x, &lines(m, self.look.label, &self.reading(m, snap)));
             return;
         }
+        match inside(m, self.look) {
+            Inside::Graph => return self.inside_graph(m, x, w, snap, hist),
+            Inside::Ring => return self.inside_ring(m, x, w, snap),
+            Inside::No => {}
+        }
         let gw = graphic_width(m) * s;
         self.graphic(m, x, gw, snap, hist);
         self.draw_lines(x + gw + 6.0 * s, &lines(m, self.look.label, &self.reading(m, snap)));
@@ -1074,10 +1184,10 @@ impl Ctx<'_> {
         let s = self.s;
         let cy = self.y(24.0);
         match m {
-            ModuleId::Cpu => self.graph(x, gw, &[(hist.cpu_user.last_n(64).collect(), self.primary), (hist.cpu_system.last_n(64).collect(), self.secondary)], 100.0),
+            ModuleId::Cpu => self.graph(x, gw, &[(hist.cpu_user.last_n(64).collect(), self.primary), (hist.cpu_system.last_n(64).collect(), self.secondary)], 100.0, true),
             ModuleId::Gpu => {
                 let data = hist.gpus.first().map(|r| r.last_n(64).collect()).unwrap_or_default();
-                self.graph(x, gw, &[(data, self.primary)], 100.0);
+                self.graph(x, gw, &[(data, self.primary)], 100.0, true);
             }
             ModuleId::Mem => {
                 let r = 11.5 * s;
@@ -1086,7 +1196,7 @@ impl Ctx<'_> {
             ModuleId::Net => {
                 let up: Vec<f32> = hist.net_up.last_n(64).collect();
                 let down: Vec<f32> = hist.net_down.last_n(64).collect();
-                self.mirror(x, gw, &up, &down);
+                self.mirror(x, gw, &up, &down, 1.0, true);
             }
             ModuleId::Disk => {
                 let r = 11.0 * s;
@@ -1102,7 +1212,7 @@ impl Ctx<'_> {
 
     /// Compact mode: one cell, its tag on one side and its number on the other, lined
     /// up with the other cell of its column. Numbers are right-aligned.
-    fn compact(&self, slot: &Slot, x: f32, snap: &Snapshot) {
+    fn compact(&self, slot: &Slot, x: f32, snap: &Snapshot, hist: &crate::stats::model::History) {
         let s = self.s;
         let gap = TAG_GAP * s;
         let (tag_x, num_x) = match self.look.side {
@@ -1118,10 +1228,20 @@ impl Ctx<'_> {
         if slot.module == ModuleId::Net {
             // The arrows are the network's tag.
             let (up, down, unit) = self.r.rates(snap.net.up, snap.net.down);
-            for (baseline, arrow, v) in [(TOP_BASE, "↑", up), (BOTTOM_BASE, "↓", down)] {
+            let graphic = self.look.tag == Tag::Graphic;
+            let (hu, hd): (Vec<f32>, Vec<f32>) = if graphic { (hist.net_up.last_n(64).collect(), hist.net_down.last_n(64).collect()) } else { Default::default() };
+            let peak = hu.iter().chain(&hd).fold(64.0f32 * 1024.0, |m, v| m.max(*v));
+            for (baseline, arrow, v, data, color) in [(TOP_BASE, "↑", up, hu, self.secondary), (BOTTOM_BASE, "↓", down, hd, self.primary)] {
                 let a = Line { baseline, parts: vec![part(0.0, arrow, Font::Arrow, 0.75)] };
                 let aw = line_width(dwrite, fonts, &a, s);
-                self.draw_lines(tag_x + (slot.tag_w - aw) / 2.0, &[a]);
+                if graphic {
+                    // Each rate's own history, on one scale, then its arrow.
+                    let h = MINI * s;
+                    self.graph_in(tag_x, self.y(baseline - 4.8) - h / 2.0, MINI_GRAPH * s, h, &[(data, color)], peak, true);
+                    self.draw_lines(tag_x + slot.tag_w - aw, &[a]);
+                } else {
+                    self.draw_lines(tag_x + (slot.tag_w - aw) / 2.0, &[a]);
+                }
                 number(compact_value(v, unit), baseline);
             }
             return;
@@ -1135,9 +1255,108 @@ impl Ctx<'_> {
             Tag::Label => self.draw_lines(tag_x, &[Line { baseline, parts: vec![part(0.0, name(slot.module), Font::CompactTag, 0.62)] }]),
             // Centred on the digits' middle, a little under half their height.
             Tag::Icon => self.icon(slot.module, tag_x, self.y(baseline - 4.8) - ICON * s / 2.0, ICON * s, self.fg.alpha(0.75)),
+            Tag::Graphic => self.mini(slot.module, tag_x, self.y(baseline - 4.8), snap, hist),
         }
         if let Reading::Value { value, unit } = self.reading(slot.module, snap) {
             number(compact_value(value, unit), baseline);
+        }
+    }
+
+    /// Draws `lines` centred in `w` px from `x`, each on its own.
+    fn centred(&self, x: f32, w: f32, lines: &[Line]) {
+        let (dwrite, fonts) = (&self.r.dwrite, self.fonts());
+        for line in lines {
+            let lw = line_width(dwrite, fonts, line, self.s);
+            self.draw_lines(x + (w - lw) / 2.0, std::slice::from_ref(line));
+        }
+    }
+
+    /// `Label::Inside`, history items: the graph fills the item, faded, with the number
+    /// and the name over it.
+    fn inside_graph(&self, m: ModuleId, x: f32, w: f32, snap: &Snapshot, hist: &crate::stats::model::History) {
+        const FADE: f32 = 0.4;
+        match m {
+            ModuleId::Cpu => self.graph(x, w, &[(hist.cpu_user.last_n(64).collect(), self.primary.alpha(FADE)), (hist.cpu_system.last_n(64).collect(), self.secondary.alpha(FADE))], 100.0, false),
+            ModuleId::Gpu => self.graph(x, w, &[(hist.gpus.first().map(|r| r.last_n(64).collect()).unwrap_or_default(), self.primary.alpha(FADE))], 100.0, false),
+            ModuleId::Npu => self.graph(x, w, &[(hist.npu.last_n(64).collect(), self.primary.alpha(FADE))], 100.0, false),
+            _ => self.mirror(x, w, &hist.net_up.last_n(64).collect::<Vec<_>>(), &hist.net_down.last_n(64).collect::<Vec<_>>(), FADE, false),
+        }
+        self.centred(x, w, &lines(m, Label::Bottom, &over_graph(self.reading(m, snap))));
+    }
+
+    /// `Label::Inside`, ring items: the number in the ring, the name under it. The disk
+    /// keeps a thicker ring, its pie's stand-in, so it does not read as memory.
+    fn inside_ring(&self, m: ModuleId, x: f32, w: f32, snap: &Snapshot) {
+        let s = self.s;
+        let (frac, stroke) = match m {
+            ModuleId::Mem => (snap.mem.used_pct / 100.0, 3.0),
+            _ => (disk_used(snap), 4.2),
+        };
+        let cx = x + w / 2.0;
+        self.ring(cx, self.y(RING_CY), (RING_OUTER - stroke / 2.0) * s, stroke * s, frac, self.primary);
+        let value = match self.reading(m, snap) {
+            Reading::Value { value, .. } => value,
+            Reading::Rates { .. } => String::new(),
+        };
+        // Centred on the digits' middle: the baseline sits half a cap height under it.
+        let number = Line { baseline: RING_CY + 4.0, parts: vec![part(0.0, value, Font::Inside, 1.0)] };
+        let caption = Line { baseline: 38.0, parts: vec![part(0.0, name(m), Font::Caption, 0.62)] };
+        self.centred(x, w, &[number, caption]);
+    }
+
+    /// Runs `draw` scaled by `k` around `from`, which lands on `to` (px).
+    fn scaled(&self, k: f32, from: (f32, f32), to: (f32, f32), draw: impl FnOnce()) {
+        let m = windows_numerics::Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: to.0 - k * from.0, M32: to.1 - k * from.1 };
+        unsafe { self.t().SetTransform(&m) };
+        draw();
+        unsafe { self.t().SetTransform(&windows_numerics::Matrix3x2::identity()) };
+    }
+
+    /// `Tag::Graphic`: the item's graphic, small, `MINI` DIPs tall, its left edge at `x`
+    /// and its middle at `cy` (px).
+    fn mini(&self, m: ModuleId, x: f32, cy: f32, snap: &Snapshot, hist: &crate::stats::model::History) {
+        let s = self.s;
+        let h = MINI * s;
+        let (top, cx) = (cy - h / 2.0, x + h / 2.0);
+        // Graphics drawn full size around the bar's middle, scaled into the cell.
+        let full = |dx: f32, tall: f32| ((x + dx * s, self.y(24.0)), h / (tall * s));
+        match m {
+            ModuleId::Cpu => self.graph_in(x, top, MINI_GRAPH * s, h, &[(hist.cpu_user.last_n(64).collect(), self.primary), (hist.cpu_system.last_n(64).collect(), self.secondary)], 100.0, true),
+            ModuleId::Gpu => self.graph_in(x, top, MINI_GRAPH * s, h, &[(hist.gpus.first().map(|r| r.last_n(64).collect()).unwrap_or_default(), self.primary)], 100.0, true),
+            ModuleId::Mem => self.ring(cx, cy, h / 2.0 - 1.2 * s, 2.2 * s, snap.mem.used_pct / 100.0, self.primary),
+            ModuleId::Disk => self.pie(cx, cy, h / 2.0 - 0.5 * s, disk_used(snap), self.primary),
+            ModuleId::Npu => {
+                // The chip's core: a square filling bottom-up.
+                let side = h - 1.0 * s;
+                let (sx, sy) = (cx - side / 2.0, cy - side / 2.0);
+                self.round_rect(sx, sy, side, side, 2.0 * s, self.fg.alpha(0.18));
+                let fill = side * snap.npu.as_ref().map_or(0.0, |n| n.util / 100.0).clamp(0.0, 1.0);
+                if fill >= 0.5 {
+                    self.round_rect(sx, sy + side - fill, side, fill, 2.0 * s, self.primary);
+                }
+            }
+            ModuleId::Temp => {
+                // A column rising with the temperature, in its band's colour.
+                let (cw, t) = (4.5 * s, snap.headline_temp());
+                self.round_rect(cx - cw / 2.0, top, cw, h, cw / 2.0, self.fg.alpha(0.18));
+                if let Some(c) = t {
+                    let fill = (h * ((c - 30.0) / 70.0).clamp(0.08, 1.0)).max(cw);
+                    self.round_rect(cx - cw / 2.0, top + h - fill, cw, fill, cw / 2.0, self.temp_color(c));
+                }
+            }
+            ModuleId::Fans => {
+                let (from, k) = full(12.0, 24.0);
+                self.scaled(k, from, (cx, cy), || self.fan(x));
+            }
+            ModuleId::Battery => {
+                let (from, k) = full(6.5, 27.0);
+                self.scaled(k, from, (cx, cy), || self.battery(x, snap.battery.as_ref().map(|b| b.percent / 100.0), snap.battery.as_ref().is_some_and(|b| b.charging)));
+            }
+            ModuleId::Power => {
+                let (from, k) = full(8.5, 28.0);
+                self.scaled(k, from, (cx, cy), || self.bolt(x));
+            }
+            ModuleId::Net => {}
         }
     }
 
@@ -1316,7 +1535,32 @@ mod tests {
             shots(tag, Look { label, ..Look::default() });
             shots(&format!("{tag}-plain"), Look { label, graphics: false, ..Look::default() });
         }
-        for (tag, t) in [(Tag::Icon, "icon"), (Tag::Label, "label")] {
+        shots("inside", Look { label: Label::Inside, ..Look::default() });
+        let mine = [ModuleId::Cpu, ModuleId::Gpu, ModuleId::Npu, ModuleId::Mem, ModuleId::Disk, ModuleId::Net, ModuleId::Temp, ModuleId::Fans];
+        for (name, look) in [
+            ("mine-bottom", Look { label: Label::Bottom, ..Look::default() }),
+            ("mine-inside", Look { label: Label::Inside, ..Look::default() }),
+            ("mine-compact-graphic", Look { compact: true, tag: Tag::Graphic, ..Look::default() }),
+        ] {
+            save(&format!("{name}-dark.png"), preview_png(&mine, look, &store, false, colors, 2.0));
+        }
+        // The same at rest: low numbers, flat graphs, as a quiet machine shows it.
+        let mut idle = sample_store(72.0);
+        idle.history = crate::stats::model::History::new();
+        let mut snap = idle.snapshot.clone();
+        snap.cpu.user = 10.0;
+        snap.cpu.system = 3.0;
+        snap.cpu.total = 13.0;
+        snap.gpus[0].util = 1.0;
+        if let Some(n) = snap.npu.as_mut() {
+            n.util = 0.0;
+        }
+        for _ in 0..64 {
+            idle.history.record(&snap);
+        }
+        idle.snapshot = snap;
+        save("mine-inside-idle-dark.png", preview_png(&mine, Look { label: Label::Inside, ..Look::default() }, &idle, false, colors, 2.0));
+        for (tag, t) in [(Tag::Icon, "icon"), (Tag::Label, "label"), (Tag::Graphic, "graphic")] {
             for (side, sd) in [(Side::Left, "left"), (Side::Right, "right")] {
                 shots(&format!("compact-{t}-{sd}"), Look { compact: true, tag, side, ..Look::default() });
             }
@@ -1324,6 +1568,17 @@ mod tests {
         for t in [55.0, 70.0, 75.0, 85.0, 94.0] {
             save(&format!("temp-{t}.png"), preview_png(&[ModuleId::Temp], Look::default(), &sample_store(t), false, colors, 2.0));
         }
+    }
+
+    #[test]
+    fn a_hundred_fits_where_99_percent_does() {
+        let width = |value: &str, unit| {
+            let reading = over_graph(Reading::Value { value: value.into(), unit });
+            measure(2.0, |dwrite, fonts| line_width(dwrite, fonts, &lines(ModuleId::Cpu, Label::Bottom, &reading)[0], 2.0)).unwrap()
+        };
+        assert!(width("100", "%") <= width("99", "%"), "{} > {}", width("100", "%"), width("99", "%"));
+        // Below a hundred the unit stays.
+        assert!(width("42", "%") > width("42", ""));
     }
 
     #[test]
