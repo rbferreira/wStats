@@ -151,11 +151,10 @@ impl LongHistory {
             let _ = std::fs::create_dir_all(dir);
         }
         let tmp = path.with_extension("json.tmp");
-        if let Ok(bytes) = serde_json::to_vec(&self.minutes) {
-            if std::fs::write(&tmp, bytes).is_ok() {
+        if let Ok(bytes) = serde_json::to_vec(&self.minutes)
+            && std::fs::write(&tmp, bytes).is_ok() {
                 let _ = std::fs::rename(&tmp, path);
             }
-        }
     }
 }
 

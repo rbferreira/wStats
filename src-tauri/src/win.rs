@@ -87,11 +87,10 @@ impl log::Log for FileLog {
 pub fn init_log() {
     let Some(dir) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("wStats")) else { return };
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(f) = std::fs::File::create(dir.join("wstats.log")) {
-        if log::set_boxed_logger(Box::new(FileLog(std::sync::Mutex::new(f)))).is_ok() {
+    if let Ok(f) = std::fs::File::create(dir.join("wstats.log"))
+        && log::set_boxed_logger(Box::new(FileLog(std::sync::Mutex::new(f)))).is_ok() {
             log::set_max_level(log::LevelFilter::Debug);
         }
-    }
 }
 
 /// Brings `hwnd` to the front even though wStats is a background app. Windows refuses

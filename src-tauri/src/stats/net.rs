@@ -210,11 +210,10 @@ fn adapter_details() -> HashMap<u64, Details> {
         let mut g = a.FirstGatewayAddress;
         while !g.is_null() {
             let ga = unsafe { &*g };
-            if let Some(ip) = sockaddr(&ga.Address) {
-                if d.gateway.as_deref().is_none_or(|cur| cur.contains(':') && !ip.contains(':')) {
+            if let Some(ip) = sockaddr(&ga.Address)
+                && d.gateway.as_deref().is_none_or(|cur| cur.contains(':') && !ip.contains(':')) {
                     d.gateway = Some(ip);
                 }
-            }
             g = ga.Next;
         }
         let mut s = a.FirstDnsServerAddress;
