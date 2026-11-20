@@ -1005,8 +1005,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// The latency's history as a line, each stretch in the colour of its value (green,
-    /// yellow above 80 ms); a ping without an answer breaks the line with a red tick at
+    /// The latency's history as a line, each stretch in the colour of its value (the
+    /// theme colour, yellow above 80 ms); a ping without an answer breaks the line with a red tick at
     /// the top. The scale is the window's peak, never under 40 ms, so that a quiet
     /// connection's jitter does not fill the box.
     fn latency_line(&self, x: f32, y: f32, w: f32, h: f32, data: &[f32], alpha: f32, frame: bool) {
@@ -1033,7 +1033,7 @@ impl Ctx<'_> {
                 continue;
             }
             if i > 0 && tail[i - 1] >= 0.0 {
-                let color = self.color(latency_color(Some(v as u32)).alpha(alpha));
+                let color = self.color(latency_color(Some(v as u32), self.primary).alpha(alpha));
                 unsafe {
                     self.t().DrawLine(Vector2 { X: px(i - 1), Y: py(tail[i - 1]) }, Vector2 { X: px(i), Y: py(v) }, color, stroke, &self.r.round);
                 }
@@ -1680,13 +1680,13 @@ impl Ctx<'_> {
 }
 
 /// Used fraction of C: (or the first volume).
-/// The latency's colour, as the network popup's dot: green, yellow above 80 ms, red
-/// without an answer.
-fn latency_color(ms: Option<u32>) -> Rgba {
+/// The latency's colour, as the thermometer's: the theme colour `normal`, yellow above
+/// 80 ms, red without an answer.
+fn latency_color(ms: Option<u32>, normal: Rgba) -> Rgba {
     match ms {
         None => Rgba::RED,
         Some(ms) if ms > 80 => Rgba::YELLOW,
-        Some(_) => Rgba::GREEN,
+        Some(_) => normal,
     }
 }
 
