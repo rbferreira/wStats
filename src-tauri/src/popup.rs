@@ -269,12 +269,20 @@ fn geometry(anchor: RECT, height_css: f64) -> (i32, i32, u32, u32) {
         let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
         (info.rcWork, dx as f64 / 96.0)
     };
-    let w = (WIDTH_CSS * scale).round() as i32;
-    let h = ((height_css * scale).round() as i32).min(work.bottom - work.top - (2.0 * GAP_DIP * scale) as i32);
+    place(anchor, work, scale, height_css)
+}
+
+/// `max` then `min` rather than `clamp`, which panics when a small or unknown work area
+/// leaves the upper bound under the lower one.
+fn place(anchor: RECT, work: RECT, scale: f64, height_css: f64) -> (i32, i32, u32, u32) {
+    let center_x = (anchor.left + anchor.right) / 2;
     let gap = (GAP_DIP * scale).round() as i32;
-    let x = (center.x - w / 2).clamp(work.left + gap, work.right - gap - w);
+    let height_css = if height_css.is_finite() { height_css.max(1.0) } else { 1.0 };
+    let w = (WIDTH_CSS * scale).round() as i32;
+    let h = ((height_css * scale).round() as i32).min(work.bottom - work.top - 2 * gap).max(1);
+    let x = (center_x - w / 2).min(work.right - gap - w).max(work.left + gap);
     let y = if anchor.top >= work.bottom - gap { anchor.top - h - gap } else { anchor.bottom + gap };
-    let y = y.clamp(work.top + gap, work.bottom - gap - h);
+    let y = y.min(work.bottom - gap - h).max(work.top + gap);
     (x, y, w as u32, h as u32)
 }
 
@@ -288,5 +296,18 @@ mod tests {
         let anchor = RECT { left: 2700, top: 1716, right: 2800, bottom: 1800 };
         let (x, y, w, h) = geometry(anchor, 400.0);
         assert!(x >= 0 && y >= 0 && w > 0 && h > 0);
+    }
+
+    #[test]
+    fn a_work_area_too_small_or_unknown_does_not_panic() {
+        let anchor = RECT { left: 100, top: 0, right: 200, bottom: 48 };
+        // GetMonitorInfoW failed: all zeros.
+        let (_, _, w, h) = place(anchor, RECT::default(), 1.0, 400.0);
+        assert!(w > 0 && h > 0);
+        // 110 % scaling and content taller than the screen.
+        let work = RECT { left: 0, top: 48, right: 1280, bottom: 720 };
+        let (_, y, _, h) = place(anchor, work, 1.1, 5000.0);
+        assert!(y >= work.top && y + h as i32 <= work.bottom);
+        place(anchor, work, 1.1, f64::NAN);
     }
 }

@@ -91,6 +91,8 @@ let settings: Settings = structuredClone(DEFAULTS);
 let monitors: MonitorInfo[] = [{ id: "\\\\.\\DISPLAY1", name: "", width: 2880, height: 1800, primary: true }];
 let autostart = false;
 let saveTimer = 0;
+/** Saves sent and not yet answered. */
+let saving = 0;
 
 interface SensorStatus {
   available: boolean;
@@ -122,7 +124,12 @@ function update(change: (s: Settings) => void) {
   clearTimeout(saveTimer);
   // Coalesce bursts (dragging a colour picker) into one write.
   saveTimer = window.setTimeout(() => {
-    if (inTauri) invoke("set_settings", { settings }).catch(console.error);
+    saveTimer = 0;
+    if (!inTauri) return;
+    saving++;
+    invoke("set_settings", { settings })
+      .catch(console.error)
+      .finally(() => saving--);
   }, 120);
 }
 
@@ -698,6 +705,8 @@ async function boot() {
     });
     // Changes made elsewhere (e.g. the taskbar menu) show up here too.
     await listen<Settings>("settings", (e) => {
+      // Our own save coming back: with newer edits waiting, it would undo them.
+      if (saveTimer || saving) return;
       if (JSON.stringify(e.payload) === JSON.stringify(settings)) return;
       settings = e.payload;
       applySettings(settings);

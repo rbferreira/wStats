@@ -21,6 +21,20 @@ async function tauri() {
 
 const HISTORY_LEN = 600;
 
+/** The state the stream keeps up to date; refreshed in place by `refresh`. */
+let live: State | null = null;
+
+/**
+ * Fetches the whole state again. The popup only receives samples while it is open, so
+ * what it holds after being hidden is as old as its last showing.
+ */
+export async function refresh() {
+  if (!inTauri || !live) return;
+  const fresh = await (await tauri())<State>("get_state");
+  live.snapshot = fresh.snapshot;
+  live.history = fresh.history;
+}
+
 /** Same bookkeeping as `History::record` in Rust, applied to each streamed snapshot. */
 function record(h: History, s: Snapshot) {
   const push = (a: number[], v: number) => {
@@ -66,6 +80,7 @@ export async function connect(onUpdate: (s: State) => void): Promise<State> {
   const inv = await tauri();
   const { listen } = await import("@tauri-apps/api/event");
   const state = await inv<State>("get_state");
+  live = state;
   onUpdate(state);
   await listen<Snapshot>("stats", (e) => {
     record(state.history, e.payload);
@@ -84,7 +99,8 @@ function letterTile(name: string): string {
   let hash = 0;
   for (const c of name) hash = (hash * 31 + c.charCodeAt(0)) | 0;
   const hue = Math.abs(hash) % 360;
-  const letter = (name.trim()[0] || "?").toUpperCase();
+  const first = ([...name.trim()][0] || "?").toUpperCase();
+  const letter = first.replace(/[&<>]/g, (c) => `&#${c.charCodeAt(0)};`);
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="hsl(${hue} 55% 48%)"/><text x="16" y="22" font-family="Segoe UI, sans-serif" font-size="17" font-weight="600" text-anchor="middle" fill="#fff">${letter}</text></svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }

@@ -88,8 +88,13 @@ async function fetchPublicIp(): Promise<PublicIp> {
 
 function lookupPublicIp() {
   if (!publicIp || Date.now() - publicIpAt > 10 * 60_000) {
-    publicIp = fetchPublicIp();
+    const lookup = fetchPublicIp();
+    publicIp = lookup;
     publicIpAt = Date.now();
+    // A lookup that found nothing (offline, waking up) is asked again next time.
+    lookup.then((r) => {
+      if (!r.v4 && !r.v6 && publicIp === lookup) publicIp = null;
+    });
   }
   return publicIp;
 }
