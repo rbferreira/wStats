@@ -557,7 +557,17 @@ bool ReadPixels(Slot& f)
     long seq = h->seq;
     if (seq & 1 || seq == f.shownSeq) return false;
     uint32_t w = h->width, hh = h->height;
-    if (w == 0 || hh == 0 || static_cast<uint64_t>(w) * hh > wstats::kMaxPixels) return false;
+    if (static_cast<uint64_t>(w) * hh > wstats::kMaxPixels) return false;
+    if (w == 0 || hh == 0)
+    {
+        // Nothing to show (the only item's device went away): an empty frame is a frame
+        // too, or the last picture and its room would stay on the taskbar.
+        if (h->seq != seq) return false;
+        f.shownSeq = seq;
+        f.width = f.height = 0;
+        f.copy.clear();
+        return true;
+    }
     f.copy.resize(static_cast<size_t>(w) * hh * 4);
     memcpy(f.copy.data(), g_shared.pixels, f.copy.size());
     MemoryBarrier();
@@ -624,8 +634,16 @@ void Tick(Slot& f)
     }
     else if (Setup(f))
     {
-        if (ReadPixels(f) || !f.bitmap) Present(f);
-        if (f.width) Layout(f);
+        bool fresh = ReadPixels(f);
+        if (f.width && f.height)
+        {
+            if (fresh || !f.bitmap) Present(f);
+            Layout(f);
+        }
+        else if (fresh)
+        {
+            Layout(f); // zero wide: gives the room back
+        }
         Note(f, 4);
     }
     else
@@ -767,17 +785,30 @@ extern "C" void __stdcall WStatsCoreDetach()
         g_sources.clear();
     }
     wstats::Trace(L"core: detaching from %zu frames", slots.size());
+    bool leaked = false;
     for (auto& s : slots)
     {
-        try
+        if (s->thread == GetCurrentThreadId() || !s->dispatcher)
         {
-            if (s->thread == GetCurrentThreadId() || !s->dispatcher)
+            try
             {
                 Shutdown(*s);
-                continue;
             }
-            HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            Slot* raw = s.get();
+            catch (...)
+            {
+            }
+            continue;
+        }
+        // Another thread is about to run this DLL's code, and it is still inside it for a
+        // few instructions after it signals `done` (the lambda's return, the delegate's
+        // release). Pin the DLL so the stub's FreeLibrary cannot pull it from under it.
+        HMODULE self;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&WStatsCoreDetach), &self);
+        HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Slot* raw = s.get();
+        bool queued = false;
+        try
+        {
             s->dispatcher.RunAsync(Windows::UI::Core::CoreDispatcherPriority::High, [raw, done] {
                 try
                 {
@@ -788,27 +819,38 @@ extern "C" void __stdcall WStatsCoreDetach()
                 }
                 SetEvent(done);
             });
-            if (WaitForSingleObject(done, 5000) == WAIT_TIMEOUT)
-            {
-                // The shutdown is still queued on that thread and will run later, with
-                // this slot and this DLL's code. Keep both alive: leak the slot and the
-                // event, and pin the DLL so the stub's FreeLibrary cannot unload it.
-                wstats::Trace(L"core: frame %llu did not shut down in 5 s; pinning this core", static_cast<unsigned long long>(raw->handle));
-                HMODULE self;
-                GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&WStatsCoreDetach), &self);
-                s.release();
-                continue;
-            }
-            CloseHandle(done);
+            queued = true;
         }
         catch (...)
         {
+        }
+        if (!queued)
+        {
+            // That thread takes no more work. The slot belongs to it and cannot be torn
+            // down from here: leave it be.
+            wstats::Trace(L"core: frame %llu could not be reached; leaving it", static_cast<unsigned long long>(raw->handle));
+            if (done) CloseHandle(done);
+            s.release();
+            leaked = true;
+        }
+        else if (WaitForSingleObject(done, 5000) == WAIT_TIMEOUT)
+        {
+            // The shutdown is still queued on that thread and will run later, with this
+            // slot: leak the slot and the event.
+            wstats::Trace(L"core: frame %llu did not shut down in 5 s; leaving it to finish", static_cast<unsigned long long>(raw->handle));
+            s.release();
+            leaked = true;
+        }
+        else
+        {
+            CloseHandle(done);
         }
     }
     try
     {
         if (g_shared.header) g_shared.header->attached = 0;
-        g_shared.Close();
+        // A slot left behind may be mid-tick, reading the mapping.
+        if (!leaked) g_shared.Close();
         g_diag = nullptr;
     }
     catch (...)

@@ -56,11 +56,22 @@ struct Header {
 
 const _: () = assert!(size_of::<Header>() <= HEADER_SIZE);
 
+/// An attach asked of Explorer and not answered yet.
+pub struct Attach {
+    /// Core loads counted before asking: a higher count is the new core.
+    loads: i32,
+    until: Instant,
+    /// Asked of a stub that was already there (a reload), not injected.
+    reloaded: bool,
+}
+
 pub struct Surface {
     map: HANDLE,
     view: MEMORY_MAPPED_VIEW_ADDRESS,
     reload: HANDLE,
     seq: i32,
+    /// Whether the frame Explorer has is the empty one.
+    empty: bool,
 }
 
 // The mapping is only touched from the strip thread.
@@ -84,7 +95,7 @@ impl Surface {
                 return Err(windows::core::Error::from_thread());
             }
             let reload = CreateEventW(None, false, false, &HSTRING::from(RELOAD_EVENT))?;
-            let me = Self { map, view, reload, seq: 0 };
+            let me = Self { map, view, reload, seq: 0, empty: false };
             // An existing mapping (wStats restarted, TAP still in Explorer) keeps its
             // TAP-written fields; only ours are (re)initialised.
             me.seq_init();
@@ -116,6 +127,7 @@ impl Surface {
         if n > MAX_PIXELS || pixels.len() < n * 4 {
             return;
         }
+        self.empty = n == 0;
         unsafe {
             let seq = field!(self.seq).read_unaligned();
             let seq = if seq & 1 == 1 { seq.wrapping_add(1) } else { seq };
@@ -128,6 +140,13 @@ impl Surface {
             std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
             field!(self.seq).write_unaligned(seq.wrapping_add(2));
             self.seq = seq.wrapping_add(2);
+        }
+    }
+
+    /// Publishes a frame of no size: the strip has nothing to show.
+    pub fn clear(&mut self) {
+        if !self.empty {
+            self.publish(&[], 0, 0);
         }
     }
 
@@ -162,16 +181,27 @@ impl Surface {
         unsafe { field!(self.core_loads).read_unaligned() }
     }
 
-    /// Waits until a core loaded after `loads` has put the element on a taskbar.
-    pub fn wait_attached(&self, loads: i32, within: Duration) -> bool {
-        let until = Instant::now() + within;
-        while Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(100));
-            if self.core_loads() != loads && self.attached() > 0 {
-                return true;
+    /// Whether the attach has an answer yet: `Some(true)` once a core loaded after it was
+    /// asked for has put the element on a taskbar, `Some(false)` when Explorer took too
+    /// long, `None` while there is still time. Never waits: the strip's thread has
+    /// windows to serve, and a silent Explorer used to freeze them for ten seconds.
+    pub fn poll_attach(&self, a: &Attach) -> Option<bool> {
+        if self.core_loads() != a.loads && self.attached() > 0 {
+            if a.reloaded {
+                log::info!("xaml: core reloaded in Explorer");
             }
+            return Some(true);
         }
-        false
+        if Instant::now() < a.until {
+            return None;
+        }
+        if a.reloaded {
+            unsafe {
+                let _ = ResetEvent(self.reload);
+            }
+            log::warn!("xaml: the stub in Explorer did not confirm the reload (loads {} -> {}, attached {})", a.loads, self.core_loads(), self.attached());
+        }
+        Some(false)
     }
 
     pub fn heartbeat(&self) -> i32 {
@@ -187,9 +217,10 @@ impl Surface {
         unsafe { (field!(self.elem_x).read_unaligned(), field!(self.elem_y).read_unaligned()) }
     }
 
-    /// Gets our code running inside the taskbar's Explorer and waits for the element:
-    /// reloads the core when the stub is already there, injects the stub otherwise.
-    pub fn attach(&self) -> Result<bool, String> {
+    /// Gets our code running inside the taskbar's Explorer: reloads the core when the stub
+    /// is already there, injects the stub otherwise. The element shows up a moment later;
+    /// `poll_attach` tells when.
+    pub fn begin_attach(&self) -> Result<Attach, String> {
         let (stub, core) = install_dlls()?;
         let wide: Vec<u16> = core.as_os_str().encode_wide_lossy();
         unsafe {
@@ -206,26 +237,23 @@ impl Surface {
             // take a few seconds.
             let loads = self.core_loads();
             unsafe { SetEvent(self.reload).map_err(|e| e.to_string())? };
-            if self.wait_attached(loads, Duration::from_secs(10)) {
-                log::info!("xaml: core reloaded in Explorer ({})", core.display());
-                return Ok(true);
-            }
-            unsafe {
-                let _ = ResetEvent(self.reload);
-            }
-            log::warn!("xaml: the stub in Explorer did not confirm the reload (loads {loads} -> {}, attached {})", self.core_loads(), self.attached());
-            return Ok(false);
+            log::info!("xaml: asked the stub in Explorer to load {}", core.display());
+            return Ok(Attach { loads, until: Instant::now() + Duration::from_secs(10), reloaded: true });
         }
         log::info!("xaml: injecting the stub into Explorer ({pid})");
         let loads = self.core_loads();
         inject(&stub, pid)?;
-        Ok(self.wait_attached(loads, Duration::from_secs(5)))
+        Ok(Attach { loads, until: Instant::now() + Duration::from_secs(5), reloaded: false })
     }
 }
 
 impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
+            // A core that loads late, or is still there, holds the mapping open and would
+            // go on showing the last frame beside the fallback window. No host window is
+            // its sign that wStats left: it puts the taskbar back.
+            field!(self.host_hwnd).write_unaligned(0);
             let _ = UnmapViewOfFile(self.view);
             let _ = CloseHandle(self.map);
             let _ = CloseHandle(self.reload);
