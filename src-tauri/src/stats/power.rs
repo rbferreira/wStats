@@ -148,7 +148,7 @@ fn open_first_battery() -> Option<Device> {
             let detail = buf.as_mut_ptr().cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
             (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
             SetupDiGetDeviceInterfaceDetailW(set, &iface, Some(detail), needed, None, None).ok()?;
-            Some(PCWSTR((*detail).DevicePath.as_ptr()).to_string().ok()?)
+            PCWSTR((*detail).DevicePath.as_ptr()).to_string().ok()
         });
         let _ = SetupDiDestroyDeviceInfoList(set);
         let path = path.flatten()?;

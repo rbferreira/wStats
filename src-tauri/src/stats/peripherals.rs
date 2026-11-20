@@ -84,11 +84,10 @@ impl Peripheral {
     pub fn short_name(&self) -> String {
         let words: Vec<&str> = self.name.split_whitespace().collect();
         let mut s = words.first().copied().unwrap_or("").to_string();
-        if let (true, Some(last)) = (s.chars().count() <= 2 && words.len() > 1, words.last()) {
-            if last.chars().count() <= 4 {
+        if let (true, Some(last)) = (s.chars().count() <= 2 && words.len() > 1, words.last())
+            && last.chars().count() <= 4 {
                 s = format!("{s} {last}");
             }
-        }
         s.to_uppercase().chars().take(9).collect()
     }
 }
@@ -167,7 +166,7 @@ fn string_property(set: HDEVINFO, dev: &SP_DEVINFO_DATA, key: &DEVPROPKEY) -> Op
     if ty != DEVPROP_TYPE_STRING {
         return None;
     }
-    let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+    let wide: Vec<u16> = buf.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
     Some(String::from_utf16_lossy(&wide))
 }
 
@@ -442,11 +441,10 @@ impl Hid {
         unsafe {
             let mut ov = OVERLAPPED { hEvent: self.event, ..Default::default() };
             let started = if write { WriteFile(self.handle, Some(buf), None, Some(&mut ov)) } else { ReadFile(self.handle, Some(buf), None, Some(&mut ov)) };
-            if let Err(e) = started {
-                if e.code() != ERROR_IO_PENDING.to_hresult() {
+            if let Err(e) = started
+                && e.code() != ERROR_IO_PENDING.to_hresult() {
                     return None;
                 }
-            }
             let mut n = 0u32;
             if GetOverlappedResultEx(self.handle, &ov, &mut n, ms, false).is_err() {
                 let _ = CancelIoEx(self.handle, Some(&ov));
@@ -593,10 +591,9 @@ fn logitech_device(hid: &Hid, index: u8) -> Option<Peripheral> {
         (r[0].min(100), matches!(r[2], 1 | 2 | 4))
     } else if let Some(f) = hid.feature(index, BATTERY_VOLTAGE) {
         battery_voltage(&hid.request(index, f, 0, &[])?)?
-    } else if let Some(f) = hid.feature(index, ADC_MEASUREMENT) {
-        adc_measurement(&hid.request(index, f, 0, &[])?)?
     } else {
-        return None;
+        let f = hid.feature(index, ADC_MEASUREMENT)?;
+        adc_measurement(&hid.request(index, f, 0, &[])?)?
     };
 
     let mut name = String::new();
@@ -919,7 +916,7 @@ fn usb_read(h: HANDLE, b: BatteryValue, len: usize) -> Option<(Option<u32>, Stri
             let _ = HidD_FreePreparsedData(pp);
         }
         let mut name = [0u16; 128];
-        let name = HidD_GetProductString(h, name.as_mut_ptr().cast(), 256).then(|| String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(0)]).trim().to_string()).unwrap_or_default();
+        let name = if HidD_GetProductString(h, name.as_mut_ptr().cast(), 256) { String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(0)]).trim().to_string() } else { Default::default() };
         let _ = tx.send((raw, name));
     });
     if reader.is_err() {
@@ -1045,17 +1042,15 @@ impl Peripherals {
         // Connected first, then the most recently seen.
         self.list.sort_by(|a, b| b.connected.cmp(&a.connected).then(b.seen.cmp(&a.seen)).then(a.name.cmp(&b.name)));
         let changed = self.list.len() != before.len() || self.list.iter().zip(&before).any(|(a, b)| a.id != b.id || a.percent != b.percent || a.connected != b.connected);
-        if changed {
-            if let Some(f) = &self.file {
-                if let Ok(json) = serde_json::to_vec(&self.list) {
+        if changed
+            && let Some(f) = &self.file
+                && let Ok(json) = serde_json::to_vec(&self.list) {
                     // Write-then-rename: a crash mid-write must not cost the list.
                     let tmp = f.with_extension("json.tmp");
                     if std::fs::write(&tmp, json).is_ok() {
                         let _ = std::fs::rename(tmp, f);
                     }
                 }
-            }
-        }
     }
 }
 

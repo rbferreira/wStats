@@ -144,11 +144,10 @@ impl Popup {
                     return;
                 }
             }
-            if me.save_memory.load(Ordering::Relaxed) {
-                if let Some(win) = me.window() {
+            if me.save_memory.load(Ordering::Relaxed)
+                && let Some(win) = me.window() {
                     let _ = win.destroy();
                 }
-            }
         });
     }
 

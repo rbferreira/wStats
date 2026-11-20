@@ -162,13 +162,12 @@ impl Sampler {
                 self.board = Some(b);
             }
         }
-        if let Some(ddv) = &self.ddv {
-            if self.ddv_at.is_none_or(|t| t.elapsed() >= DDV_INTERVAL) {
+        if let Some(ddv) = &self.ddv
+            && self.ddv_at.is_none_or(|t| t.elapsed() >= DDV_INTERVAL) {
                 self.ddv_at = Some(Instant::now());
                 self.fans = ddv.fans().unwrap_or_default();
                 self.thermals = ddv.thermals().unwrap_or_default();
             }
-        }
         // A BIOS setting: it changes only when someone changes it.
         if self.ddv.is_some() && self.mode_at.is_none_or(|t| t.elapsed() >= MODE_INTERVAL) {
             self.mode_at = Some(Instant::now());
