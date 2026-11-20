@@ -29,6 +29,8 @@ pub struct GpuCollector {
     adapters: Vec<Adapter>,
     /// NVIDIA's management library, when an NVIDIA GPU is present.
     nvml: Option<Nvml>,
+    /// Counter LUIDs no adapter answered for when the adapters were last listed.
+    strangers: Vec<String>,
 }
 
 impl GpuCollector {
@@ -40,10 +42,29 @@ impl GpuCollector {
             shared: q.add(r"\GPU Adapter Memory(*)\Shared Usage"),
             nvml: adapters.iter().any(|a| a.vendor == VENDOR_NVIDIA).then(Nvml::open).flatten(),
             adapters,
+            strangers: Vec::new(),
         }
     }
 
-    pub fn sample(&self, q: &Query) -> Vec<Gpu> {
+    /// A driver update, or a GPU disabled, enabled or plugged in, gives the adapter a new
+    /// LUID: the counters then name one nobody here knows. List the adapters again, once
+    /// per change (software adapters have counters too and stay strangers for good).
+    fn follow_adapters(&mut self, counted: &HashMap<String, HashMap<String, f64>>) {
+        let mut strangers: Vec<String> = counted.keys().filter(|l| !self.adapters.iter().any(|a| &a.luid == *l)).cloned().collect();
+        strangers.sort();
+        if strangers == self.strangers {
+            return;
+        }
+        log::info!("gpu: the adapters changed, listing them again");
+        close_adapters(&self.adapters);
+        self.adapters = list_adapters();
+        self.nvml = None; // the old library handle goes before a new one is opened
+        self.nvml = self.adapters.iter().any(|a| a.vendor == VENDOR_NVIDIA).then(Nvml::open).flatten();
+        strangers.retain(|l| !self.adapters.iter().any(|a| &a.luid == l));
+        self.strangers = strangers;
+    }
+
+    pub fn sample(&mut self, q: &Query) -> Vec<Gpu> {
         // luid -> engine type -> summed utilization
         let mut per: HashMap<String, HashMap<String, f64>> = HashMap::new();
         for (name, v) in q.array(self.engines) {
@@ -56,6 +77,7 @@ impl GpuCollector {
                 *per.entry(luid).or_default().entry(eng.to_string()).or_default() += v.max(0.0);
             }
         }
+        self.follow_adapters(&per);
         let mem = |c| -> HashMap<String, u64> {
             q.array(c)
                 .into_iter()
@@ -104,6 +126,20 @@ impl GpuCollector {
                 g
             })
             .collect()
+    }
+}
+
+impl Drop for GpuCollector {
+    fn drop(&mut self) {
+        close_adapters(&self.adapters);
+    }
+}
+
+fn close_adapters(adapters: &[Adapter]) {
+    for a in adapters.iter().filter(|a| a.kmt != 0) {
+        unsafe {
+            let _ = D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER { hAdapter: a.kmt });
+        }
     }
 }
 

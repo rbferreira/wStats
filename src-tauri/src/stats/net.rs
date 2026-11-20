@@ -49,9 +49,6 @@ pub fn rate(prev: u64, cur: u64, secs: f64) -> f64 {
 
 impl NetCollector {
     pub fn new() -> Self {
-        let mut version = 0u32;
-        let mut handle = HANDLE::default();
-        let wlan = (unsafe { WlanOpenHandle(2, None, &mut version, &mut handle) } == 0).then_some(handle);
         Self {
             prev: HashMap::new(),
             prev_at: None,
@@ -60,7 +57,7 @@ impl NetCollector {
             details: HashMap::new(),
             wifi: HashMap::new(),
             details_at: None,
-            wlan,
+            wlan: open_wlan(),
         }
     }
 
@@ -71,7 +68,18 @@ impl NetCollector {
 
         if self.details_at.is_none_or(|t| t.elapsed() >= DETAILS_REFRESH) {
             self.details = adapter_details();
-            self.wifi = self.wlan.map(wifi_details).unwrap_or_default();
+            // The WLAN service may start after wStats, or restart: a handle that is
+            // missing or no longer answers is opened again for the next round.
+            self.wifi = match self.wlan.and_then(wifi_details) {
+                Some(wifi) => wifi,
+                None => {
+                    if let Some(h) = self.wlan.take() {
+                        unsafe { WlanCloseHandle(h, None) };
+                    }
+                    self.wlan = open_wlan();
+                    HashMap::new()
+                }
+            };
             self.details_at = Some(now);
         }
 
@@ -228,11 +236,18 @@ fn phy_name(t: DOT11_PHY_TYPE) -> &'static str {
         .unwrap_or("802.11")
 }
 
-fn wifi_details(handle: HANDLE) -> HashMap<GUID, Wifi> {
+fn open_wlan() -> Option<HANDLE> {
+    let mut version = 0u32;
+    let mut handle = HANDLE::default();
+    (unsafe { WlanOpenHandle(2, None, &mut version, &mut handle) } == 0).then_some(handle)
+}
+
+/// `None` when the handle no longer works.
+fn wifi_details(handle: HANDLE) -> Option<HashMap<GUID, Wifi>> {
     let mut map = HashMap::new();
     let mut list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
     if unsafe { WlanEnumInterfaces(handle, None, &mut list) } != 0 || list.is_null() {
-        return map;
+        return None;
     }
     let ifaces = unsafe { std::slice::from_raw_parts((*list).InterfaceInfo.as_ptr(), (*list).dwNumberOfItems as usize) };
     for iface in ifaces {
@@ -245,7 +260,11 @@ fn wifi_details(handle: HANDLE) -> HashMap<GUID, Wifi> {
             WlanQueryInterface(handle, &iface.InterfaceGuid, wlan_intf_opcode_current_connection, None, &mut size, &mut data, None)
         };
         if rc != 0 || data.is_null() {
-            log::debug!("wlan: current_connection failed ({rc})");
+            // Every few seconds for as long as Windows refuses: say it once per code.
+            static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if LAST.swap(rc, std::sync::atomic::Ordering::Relaxed) != rc {
+                log::debug!("wlan: current_connection failed ({rc})");
+            }
             continue;
         }
         let conn = unsafe { &*data.cast::<WLAN_CONNECTION_ATTRIBUTES>() };
@@ -282,7 +301,7 @@ fn wifi_details(handle: HANDLE) -> HashMap<GUID, Wifi> {
         map.insert(iface.InterfaceGuid, wifi);
     }
     unsafe { WlanFreeMemory(list.cast()) };
-    map
+    Some(map)
 }
 
 #[cfg(test)]

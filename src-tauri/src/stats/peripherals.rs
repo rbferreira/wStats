@@ -897,6 +897,54 @@ fn scale(raw: u32, b: &BatteryValue) -> Option<u8> {
     (max > min && (min..=max).contains(&v)).then(|| ((v - min) * 100 / (max - min)) as u8)
 }
 
+/// Asks a device for its battery report and its name. These requests wait on the device
+/// with no time limit of their own, and one dongle that never answers would stop every
+/// source (they share the poller's thread): they run on a thread of their own, cancelled
+/// after a moment. `None` when the device stayed silent.
+fn usb_read(h: HANDLE, b: BatteryValue, len: usize) -> Option<(Option<u32>, String)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let raw_handle = h.0 as isize;
+    let reader = std::thread::Builder::new().name("usb battery".into()).spawn(move || unsafe {
+        let h = HANDLE(raw_handle as _);
+        let mut pp = PHIDP_PREPARSED_DATA::default();
+        let mut raw = None;
+        if HidD_GetPreparsedData(h, &mut pp) {
+            let mut buf = vec![0u8; len];
+            buf[0] = b.report;
+            let read = if b.feature { HidD_GetFeature(h, buf.as_mut_ptr().cast(), buf.len() as u32) } else { HidD_GetInputReport(h, buf.as_mut_ptr().cast(), buf.len() as u32) };
+            let mut v = 0u32;
+            if read && HidP_GetUsageValue(if b.feature { HidP_Feature } else { HidP_Input }, BATTERY_PAGE, Some(b.link), BATTERY_STRENGTH, &mut v, pp, &buf) == HIDP_STATUS_SUCCESS {
+                raw = Some(v);
+            }
+            let _ = HidD_FreePreparsedData(pp);
+        }
+        let mut name = [0u16; 128];
+        let name = HidD_GetProductString(h, name.as_mut_ptr().cast(), 256).then(|| String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(0)]).trim().to_string()).unwrap_or_default();
+        let _ = tx.send((raw, name));
+    });
+    if reader.is_err() {
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+        return None;
+    }
+    let wait = |ms| rx.recv_timeout(std::time::Duration::from_millis(ms)).ok();
+    let answer = wait(1500).or_else(|| {
+        unsafe {
+            let _ = CancelIoEx(h, None);
+        }
+        // The cancelled request returns and the thread ends; what it read is not kept.
+        wait(1000).and(None)
+    });
+    // Still inside the request after the cancel: the handle stays with that thread.
+    if answer.is_some() || rx.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+    }
+    answer
+}
+
 /// USB devices whose own description has a battery strength: dongles of several brands.
 /// Bluetooth ones are left out (Windows already reads those), and so are the brands
 /// read above.
@@ -908,25 +956,12 @@ fn usb_batteries(cols: &[Collection]) -> Vec<Peripheral> {
         if out.iter().any(|o| o.id == id) {
             continue;
         }
-        unsafe {
-            // Feature reports work on a handle without access; keyboards and mice allow no more.
-            let open = |access: u32| CreateFileW(PCWSTR(c.path.as_ptr()), access, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None);
-            let Ok(h) = open((GENERIC_READ | GENERIC_WRITE).0).or_else(|_| open(0)) else { continue };
-            let mut pp = PHIDP_PREPARSED_DATA::default();
-            let mut raw = None;
-            if HidD_GetPreparsedData(h, &mut pp) {
-                let mut buf = vec![0u8; if b.feature { c.feature_len } else { c.in_len }.max(2)];
-                buf[0] = b.report;
-                let read = if b.feature { HidD_GetFeature(h, buf.as_mut_ptr().cast(), buf.len() as u32) } else { HidD_GetInputReport(h, buf.as_mut_ptr().cast(), buf.len() as u32) };
-                let mut v = 0u32;
-                if read && HidP_GetUsageValue(if b.feature { HidP_Feature } else { HidP_Input }, BATTERY_PAGE, Some(b.link), BATTERY_STRENGTH, &mut v, pp, &buf) == HIDP_STATUS_SUCCESS {
-                    raw = Some(v);
-                }
-                let _ = HidD_FreePreparsedData(pp);
-            }
-            let mut name = [0u16; 128];
-            let name = HidD_GetProductString(h, name.as_mut_ptr().cast(), 256).then(|| String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(0)]).trim().to_string()).unwrap_or_default();
-            let _ = CloseHandle(h);
+        // Feature reports work on a handle without access; keyboards and mice allow no more.
+        let open = |access: u32| unsafe { CreateFileW(PCWSTR(c.path.as_ptr()), access, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) };
+        let Ok(h) = open((GENERIC_READ | GENERIC_WRITE).0).or_else(|_| open(0)) else { continue };
+        let len = if b.feature { c.feature_len } else { c.in_len }.max(2);
+        let Some((raw, name)) = usb_read(h, b, len) else { continue };
+        {
             // Zero is what wired devices that only declare the field send.
             let Some(percent) = raw.and_then(|v| scale(v, &b)).filter(|&p| p > 0) else { continue };
             let kind = match (c.page, c.usage) {
@@ -949,6 +984,8 @@ fn usb_batteries(cols: &[Collection]) -> Vec<Peripheral> {
 pub struct Peripherals {
     list: Vec<Peripheral>,
     file: Option<PathBuf>,
+    /// Ids dropped for a better entry of the same device (old, new), until taken.
+    moved: Vec<(String, String)>,
 }
 
 impl Peripherals {
@@ -957,7 +994,13 @@ impl Peripherals {
         for p in &mut list {
             p.connected = false;
         }
-        Self { list, file }
+        Self { list, file, moved: Vec::new() }
+    }
+
+    /// The ids replaced since the last call, so a device picked for the taskbar under
+    /// its old id stays picked.
+    pub fn take_moved(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.moved)
     }
 
     pub fn list(&self) -> &[Peripheral] {
@@ -988,13 +1031,28 @@ impl Peripherals {
                 None => self.list.push(p),
             }
         }
+        // A device first seen over Bluetooth alone (its other source was asleep) and read
+        // the better way since: the Bluetooth entry would stay behind as a disconnected twin.
+        let better: Vec<(String, String)> = self.list.iter().filter(|p| p.connected && p.via != Via::Bluetooth).map(|p| (p.name.to_ascii_lowercase(), p.id.clone())).collect();
+        let moved = &mut self.moved;
+        self.list.retain(|p| {
+            let twin = (!p.connected && p.via == Via::Bluetooth).then(|| better.iter().find(|(name, _)| *name == p.name.to_ascii_lowercase())).flatten();
+            if let Some((_, id)) = twin {
+                moved.push((p.id.clone(), id.clone()));
+            }
+            twin.is_none()
+        });
         // Connected first, then the most recently seen.
         self.list.sort_by(|a, b| b.connected.cmp(&a.connected).then(b.seen.cmp(&a.seen)).then(a.name.cmp(&b.name)));
         let changed = self.list.len() != before.len() || self.list.iter().zip(&before).any(|(a, b)| a.id != b.id || a.percent != b.percent || a.connected != b.connected);
         if changed {
             if let Some(f) = &self.file {
                 if let Ok(json) = serde_json::to_vec(&self.list) {
-                    let _ = std::fs::write(f, json);
+                    // Write-then-rename: a crash mid-write must not cost the list.
+                    let tmp = f.with_extension("json.tmp");
+                    if std::fs::write(&tmp, json).is_ok() {
+                        let _ = std::fs::rename(tmp, f);
+                    }
                 }
             }
         }
@@ -1008,7 +1066,7 @@ pub fn on_taskbar(list: &[Peripheral]) -> impl Iterator<Item = &Peripheral> {
 
 /// Polls on its own thread, every minute while `wanted` says so (the item is on the
 /// taskbar or Settings is open), right away when it starts being wanted.
-pub fn spawn_poller(list: std::sync::Arc<parking_lot::RwLock<Peripherals>>, wanted: impl Fn() -> bool + Send + 'static) {
+pub fn spawn_poller(list: std::sync::Arc<parking_lot::RwLock<Peripherals>>, wanted: impl Fn() -> bool + Send + 'static, moved: impl Fn(Vec<(String, String)>) + Send + 'static) {
     std::thread::Builder::new()
         .name("peripherals".into())
         .spawn(move || {
@@ -1016,7 +1074,14 @@ pub fn spawn_poller(list: std::sync::Arc<parking_lot::RwLock<Peripherals>>, want
             loop {
                 if wanted() && last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(60)) {
                     let polled = poll();
-                    list.write().update(polled);
+                    let replaced = {
+                        let mut list = list.write();
+                        list.update(polled);
+                        list.take_moved()
+                    };
+                    if !replaced.is_empty() {
+                        moved(replaced);
+                    }
                     last = Some(std::time::Instant::now());
                 } else if !wanted() {
                     last = None;

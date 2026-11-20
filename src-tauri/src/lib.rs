@@ -105,7 +105,9 @@ fn get_autostart(handle: AppHandle) -> bool {
 #[tauri::command]
 fn set_autostart(handle: AppHandle, enabled: bool) -> Result<(), String> {
     let al = handle.autolaunch();
-    if enabled { al.enable() } else { al.disable() }.map_err(|e| e.to_string())
+    if enabled { al.enable() } else { al.disable() }.map_err(|e| e.to_string())?;
+    win::remember_autostart(enabled);
+    Ok(())
 }
 
 #[tauri::command]
@@ -158,11 +160,6 @@ fn update_changed(handle: &AppHandle, st: &update::Status) {
 /// "Download wStats 0.4.0…", while a newer release is known.
 fn update_label(app: &App) -> Option<String> {
     app.updater.status().latest.map(|v| format!("{} {v}…", lang::tr("Baixar o wStats", "Download wStats")))
-}
-
-#[tauri::command]
-fn open_settings(handle: AppHandle) {
-    show_settings(&handle);
 }
 
 /// The settings window's height, DIPs: every page's button in the sidebar fits.
@@ -291,7 +288,10 @@ fn strip_event(handle: &AppHandle, app: &Arc<App>, event: strip::Event) {
 
 fn toggle_autostart(handle: &AppHandle) {
     let al = handle.autolaunch();
-    let _ = if al.is_enabled().unwrap_or(false) { al.disable() } else { al.enable() };
+    let enable = !al.is_enabled().unwrap_or(false);
+    if if enable { al.enable() } else { al.disable() }.is_ok() {
+        win::remember_autostart(enable);
+    }
 }
 
 fn tray_menu(handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -345,7 +345,6 @@ pub fn run() {
             strip_preview,
             get_autostart,
             set_autostart,
-            open_settings,
             update_status,
             check_update,
             download_update,
@@ -400,6 +399,13 @@ pub fn run() {
             let tick = {
                 let (handle, app) = (handle.clone(), app.clone());
                 move |snap: &stats::model::Snapshot| {
+                    let moved = std::mem::take(&mut *app.control.devices_moved.lock());
+                    if !moved.is_empty() {
+                        let mut s = app.settings.read().clone();
+                        if s.move_devices(&moved) {
+                            let _ = app.save(s, &handle);
+                        }
+                    }
                     app.strip.refresh();
                     if app.popup.is_open() {
                         let _ = handle.emit_to("popup", "stats", snap);
