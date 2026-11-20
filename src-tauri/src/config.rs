@@ -51,6 +51,9 @@ pub enum Label {
     Side,
     /// No name; the value is drawn larger.
     None,
+    /// The value inside its graphic (in the ring, over the history graph), the name
+    /// under it. Items whose graphic has no room for it fall back to `Bottom`.
+    Inside,
 }
 
 /// What identifies each number in the compact mode.
@@ -62,6 +65,8 @@ pub enum Tag {
     Icon,
     /// The item's name (CPU, MEM, ...).
     Label,
+    /// A small live graphic: history graph, ring, pie, thermometer, ...
+    Graphic,
 }
 
 /// Which side of the number an item's name goes: the compact mode's tag, and the full
