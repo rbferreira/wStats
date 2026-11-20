@@ -47,6 +47,8 @@ features = [
   "Win32_Security",
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Display",
+  "Win32_Devices_HumanInterfaceDevice",
+  "Win32_Devices_Properties",
   "Wdk_Graphics_Direct3D",
   "Wdk_System_SystemInformation",
   "Win32_System_Com",
@@ -69,6 +71,10 @@ features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_Accessibility",
+  "Foundation",
+  "Gaming_Input",
+  "Devices_Power",
+  "System_Power",
 ]
 
 [profile.release]

@@ -2,6 +2,7 @@ import type { ModuleId } from "../types";
 import { batteryModule } from "./battery";
 import type { Module } from "./common";
 import { cpuModule } from "./cpu";
+import { devicesModule } from "./devices";
 import { diskModule } from "./disk";
 import { gpuModule } from "./gpu";
 import { memModule } from "./mem";
@@ -22,4 +23,5 @@ export const MODULES: Record<ModuleId, () => Module> = {
   fans: fansModule,
   power: powerModule,
   npu: npuModule,
+  devices: devicesModule,
 };

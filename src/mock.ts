@@ -139,6 +139,11 @@ export function mockState(): { snapshot: Snapshot; history: History } {
       barFan: null,
       thermalMode: { current: "Optimized", options: ["Optimized", "Cool", "Quiet", "UltraPerformance"] },
     },
+    peripherals: [
+      { id: "lg:1", name: "MX Master 3S", kind: "mouse", via: "logitech", percent: 60, charging: false, connected: true, seen: Date.now(), shown: true },
+      { id: "lg:2", name: "MX Mechanical Mini", kind: "keyboard", via: "logitech", percent: 15, charging: false, connected: true, seen: Date.now(), shown: true },
+      { id: "bt:1", name: "EDIFIER W830BT", kind: "headset", via: "bluetooth", percent: 50, charging: false, connected: false, seen: Date.now() - 19 * 3600e3, shown: false },
+    ],
     system: { hostname: "DESKTOP-WSTATS", os: "Windows 11 Pro 25H2 (build 26300)", uptimeSecs: 18 * 86400 + 6 * 3600 + 120 },
     procs: {
       byCpu: [

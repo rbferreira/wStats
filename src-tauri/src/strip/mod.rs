@@ -396,18 +396,27 @@ impl State {
         Some(tb)
     }
 
-    fn modules(&self) -> Vec<ModuleId> {
-        let mut modules = self.shared.modules.read().clone();
-        let (has_battery, has_npu) = {
-            let s = &self.store.read().snapshot;
-            (s.battery.is_some(), s.npu.is_some())
-        };
-        modules.retain(|m| (*m != ModuleId::Battery || has_battery) && (*m != ModuleId::Npu || has_npu));
-        modules
+    /// The items to draw, and the short names of the peripherals among them: the
+    /// devices item stands for one item per picked, connected device (none: no item).
+    fn modules(&self) -> (Vec<ModuleId>, Vec<String>) {
+        let modules = self.shared.modules.read().clone();
+        let s = &self.store.read().snapshot;
+        let devices: Vec<String> = crate::stats::peripherals::on_taskbar(&s.peripherals).map(|p| p.short_name()).collect();
+        let mut out = Vec::new();
+        for m in modules {
+            match m {
+                ModuleId::Battery if s.battery.is_none() => {}
+                ModuleId::Npu if s.npu.is_none() => {}
+                ModuleId::Devices => out.extend(std::iter::repeat_n(ModuleId::Devices, devices.len())),
+                m => out.push(m),
+            }
+        }
+        (out, devices)
     }
 
     fn layout(&mut self) {
-        (self.slots, self.width) = render::layout(&self.modules(), *self.shared.look.read(), self.scale);
+        let (modules, devices) = self.modules();
+        (self.slots, self.width) = render::layout(&modules, &devices, *self.shared.look.read(), self.scale);
     }
 
     /// Lays out, places (window mode) and paints.
@@ -511,7 +520,7 @@ impl State {
         let all = self.shared.monitor.read().as_deref() == Some(ALL_MONITORS);
         let wanted: Vec<HWND> =
             if all { taskbars().into_iter().filter(|h| unsafe { IsWindowVisible(*h).as_bool() }).collect() } else { vec![self.taskbar] };
-        let modules = self.modules();
+        let (modules, devices) = self.modules();
         let look = *self.shared.look.read();
         let left = *self.shared.position.read() == Position::Left;
         let Mode::Window { bars, scanner: Some(scanner) } = &mut self.mode else { return };
@@ -531,7 +540,7 @@ impl State {
                 bar.create_window();
             }
             if relayout || !alive {
-                bar.place(scanner, modules.clone(), look, left);
+                bar.place(scanner, modules.clone(), &devices, look, left);
             }
         }
     }
@@ -589,7 +598,7 @@ impl Bar {
 
     /// Puts the window in the free gap (left or right, per settings) and drops trailing
     /// items that do not fit. It never covers a taskbar button.
-    fn place(&mut self, scanner: &taskbar::Scanner, mut modules: Vec<ModuleId>, look: Look, left: bool) {
+    fn place(&mut self, scanner: &taskbar::Scanner, mut modules: Vec<ModuleId>, devices: &[String], look: Look, left: bool) {
         let tb = rect_of(self.taskbar);
         self.scale = unsafe { GetDpiForWindow(self.taskbar) }.max(96) as f32 / 96.0;
         self.height = tb.bottom - tb.top;
@@ -608,16 +617,16 @@ impl Bar {
             .or_else(|| find(Some(self.taskbar), w!("TrayNotifyWnd")).map(|h| rect_of(h).left))
             .unwrap_or(tb.right - (88.0 * s) as i32);
 
-        let (_, full) = render::layout(&modules, look, s);
+        let (_, full) = render::layout(&modules, devices, look, s);
         let smallest = (40.0 * s) as i32;
         let (left_x, left_room) = taskbar::fit_left(&scan.obstacles, tb.left, tb.right, tray_left, margin);
         let use_left = left && left_room >= smallest;
         let room = if use_left { left_room } else { taskbar::fit(tray_left, &scan.obstacles, tb.left, full, margin).1 };
 
-        let (mut slots, mut width) = render::layout(&modules, look, s);
+        let (mut slots, mut width) = render::layout(&modules, devices, look, s);
         while width > room && !modules.is_empty() {
             modules.pop();
-            (slots, width) = render::layout(&modules, look, s);
+            (slots, width) = render::layout(&modules, devices, look, s);
         }
         self.slots = slots;
         self.width = width;

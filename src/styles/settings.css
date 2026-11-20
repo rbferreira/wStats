@@ -325,6 +325,30 @@ body.settings {
   font-size: 13.5px;
 }
 
+/* A peripheral's row: kind icon, name, and where/how full under it. */
+.field-label:has(.dev-icon) {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  column-gap: 10px;
+  align-items: center;
+}
+
+.field-label .dev-icon {
+  grid-row: span 2;
+}
+
+.field-label .dev-icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.field-sub {
+  grid-column: 2;
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
 .field-hint,
 .prose {
   margin: 0;
