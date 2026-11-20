@@ -113,9 +113,9 @@ struct Slot
     Image image{nullptr};
     WriteableBitmap bitmap{nullptr};
     FrameworkElement widgets{nullptr};
-    Thickness widgetsMargin{}, repeaterMargin{};
-    TranslateTransform shift{nullptr}; // recentres the icons; see Recenter
-    Transform repeaterTransform{nullptr};
+    FrameworkElement start{nullptr}; // the Start button, whose margin moves the icons; see Push
+    Thickness widgetsMargin{}, repeaterMargin{}, startMargin{};
+    double push = 0; // DIPs the icons are moved right (negative: left) by start's margin
     DispatcherTimer timer{nullptr};
     DispatcherTimer::Tick_revoker tick;
     FrameworkElement::PointerMoved_revoker moved;
@@ -180,12 +180,13 @@ T FindChild(DependencyObject const& parent, std::wstring_view name)
     return nullptr;
 }
 
-FrameworkElement FindWidgets(Panel const& repeater)
+/// One of the repeater's items, by automation id ("WidgetsButton", "StartButton").
+FrameworkElement FindItem(Panel const& repeater, std::wstring_view id)
 {
     for (int i = 0, n = VisualTreeHelper::GetChildrenCount(repeater); i < n; i++)
     {
         auto child = VisualTreeHelper::GetChild(repeater, i).try_as<FrameworkElement>();
-        if (child && Automation::AutomationProperties::GetAutomationId(child) == L"WidgetsButton") return child;
+        if (child && Automation::AutomationProperties::GetAutomationId(child) == id) return child;
     }
     return nullptr;
 }
@@ -297,9 +298,9 @@ void Teardown(Slot& f)
     f.rightTapped.revoke();
     if (f.widgets) f.widgets.Margin(f.widgetsMargin);
     if (f.repeater) f.repeater.Margin(f.repeaterMargin);
-    if (f.repeater && f.shift) f.repeater.RenderTransform(f.repeaterTransform);
-    f.shift = nullptr;
-    f.repeaterTransform = nullptr;
+    if (f.start) f.start.Margin(f.startMargin);
+    f.start = nullptr;
+    f.push = 0;
     if (f.root && f.host)
     {
         uint32_t index;
@@ -425,45 +426,51 @@ bool Centered()
     return centered;
 }
 
-/// Puts centred icons back in the middle of the bar. The repeater centres its icons in
-/// whatever width it is given, so reserving the strip's room on one side (`reserved`,
-/// DIPs: positive on the left, negative on the right) moves them half of it away. A
-/// render transform moves them back, only as far as the free space beside them allows.
-/// Not a matching margin on the other side: that leaves less room, and on a narrow bar
-/// Windows sends icons to the overflow menu.
-void Recenter(Slot& f, double reserved)
+/// Moves the icons clear of the strip, `want` DIPs (positive: right, negative: left),
+/// through a margin on the Start button, the first item of the icon group.
+///
+/// Not a margin or a transform on the repeater itself: Explorer places a button's jump
+/// list and thumbnails from the button's position inside the repeater, measured from
+/// where the repeater would sit untouched. Shifting the repeater moved the icons but not
+/// their menus (half the strip's width away, measured). A margin on an item is part of
+/// the repeater's own layout, so the menus follow.
+void Push(Slot& f, double want)
 {
-    double shift = 0;
-    if (reserved != 0 && Centered())
+    auto start = FindItem(f.repeater, L"StartButton");
+    if (start != f.start)
     {
-        // The icons' extent, from layout positions (the repeater's own transform is not
-        // part of them, so this does not feed back on itself).
-        double width = f.repeater.ActualWidth(), first = width, last = 0;
-        for (int i = 0, n = VisualTreeHelper::GetChildrenCount(f.repeater); i < n; i++)
-        {
-            auto child = VisualTreeHelper::GetChild(f.repeater, i).try_as<FrameworkElement>();
-            if (!child || child.ActualWidth() <= 0 || child.Visibility() != Visibility::Visible) continue;
-            double x = child.TransformToVisual(f.repeater).TransformPoint({0, 0}).X;
-            if (x + child.ActualWidth() <= 0 || x >= width) continue; // recycled, parked out of view
-            first = std::min(first, x);
-            last = std::max(last, x + child.ActualWidth());
-        }
-        if (last > first) shift = reserved > 0 ? -std::min(reserved / 2, first) : std::min(-reserved / 2, width - last);
+        if (f.start) f.start.Margin(f.startMargin);
+        f.start = start;
+        f.push = 0;
+        if (start) f.startMargin = start.Margin();
     }
-    if (!f.shift)
+    if (!f.start) return;
+    // Centred icons move half of what the group grows by.
+    double k = Centered() ? 2 : 1;
+    SetMargin(f.start, {f.startMargin.Left + want * k, f.startMargin.Top, f.startMargin.Right, f.startMargin.Bottom});
+    f.push = want;
+}
+
+/// Where the icon group would sit without our push, in the root's coordinates: from
+/// layout positions, less the push already applied, so this does not feed back on itself.
+bool IconExtent(Slot& f, double& first, double& last)
+{
+    first = 1e9, last = -1e9;
+    double width = f.repeater.ActualWidth();
+    for (int i = 0, n = VisualTreeHelper::GetChildrenCount(f.repeater); i < n; i++)
     {
-        if (Near(shift, 0)) return;
-        f.shift = TranslateTransform();
+        auto child = VisualTreeHelper::GetChild(f.repeater, i).try_as<FrameworkElement>();
+        if (!child || child == f.widgets || child.ActualWidth() <= 0 || child.Visibility() != Visibility::Visible) continue;
+        double x = child.TransformToVisual(f.repeater).TransformPoint({0, 0}).X;
+        if (x + child.ActualWidth() <= 0 || x >= width) continue; // recycled, parked out of view
+        double rx = child.TransformToVisual(f.root).TransformPoint({0, 0}).X;
+        first = std::min(first, rx);
+        last = std::max(last, rx + child.ActualWidth());
     }
-    // The repeater comes with an identity MatrixTransform; it is put back on teardown.
-    // Should the taskbar set another one later, ours replaces it again.
-    auto current = f.repeater.RenderTransform();
-    if (current != f.shift)
-    {
-        f.repeaterTransform = current;
-        f.repeater.RenderTransform(f.shift);
-    }
-    if (!Near(f.shift.X(), shift)) f.shift.X(shift);
+    if (last < first) return false;
+    first -= f.push;
+    last -= f.push;
+    return true;
 }
 
 void Layout(Slot& f)
@@ -476,7 +483,7 @@ void Layout(Slot& f)
     f.image.Height(h);
     double reserve = w > 0 ? w + 2 * kGap : 0;
 
-    auto widgets = FindWidgets(f.repeater);
+    auto widgets = FindItem(f.repeater, L"WidgetsButton");
     if (widgets != f.widgets)
     {
         if (f.widgets) f.widgets.Margin(f.widgetsMargin);
@@ -486,7 +493,8 @@ void Layout(Slot& f)
 
     bool left = g_shared.header->position == wstats::Left;
     bool widgetsShown = WidgetsShown(f);
-    double reserved = 0; // room taken from the repeater, for Recenter
+    double first = 0, last = 0;
+    bool icons = IconExtent(f, first, last);
     if (left && widgetsShown)
     {
         // The Widgets button is wider than what it draws (it keeps ~58 DIP of slack on
@@ -503,25 +511,42 @@ void Layout(Slot& f)
         SetMargin(f.repeater, f.repeaterMargin);
         f.host.HorizontalAlignment(HorizontalAlignment::Left);
         SetMargin(f.host, {x, 0, 0, 0});
+        Push(f, 0);
     }
     else if (left)
     {
+        // The repeater keeps its place; the icons move right only as far as needed to
+        // clear the strip (centred icons usually already are).
         if (f.widgets) SetMargin(f.widgets, f.widgetsMargin);
-        SetMargin(f.repeater, {f.repeaterMargin.Left + reserve, f.repeaterMargin.Top, f.repeaterMargin.Right, f.repeaterMargin.Bottom});
+        SetMargin(f.repeater, f.repeaterMargin);
+        double x = f.repeaterMargin.Left + kGap;
         f.host.HorizontalAlignment(HorizontalAlignment::Left);
-        SetMargin(f.host, {f.repeaterMargin.Left + kGap, 0, 0, 0});
-        reserved = reserve;
+        SetMargin(f.host, {x, 0, 0, 0});
+        Push(f, icons && w > 0 ? std::max(0.0, x + w + kGap - first) : 0.0);
     }
     else
     {
         if (f.widgets) SetMargin(f.widgets, f.widgetsMargin);
         double tray = TrayInset(f);
-        SetMargin(f.repeater, {f.repeaterMargin.Left, f.repeaterMargin.Top, f.repeaterMargin.Right + tray + reserve, f.repeaterMargin.Bottom});
         f.host.HorizontalAlignment(HorizontalAlignment::Right);
         SetMargin(f.host, {0, 0, tray + kGap, 0});
-        reserved = -(tray + reserve);
+        if (Centered())
+        {
+            // As on the left: the repeater's right margin would leave centred icons
+            // off-centre, so they move left only when they would reach the strip.
+            SetMargin(f.repeater, f.repeaterMargin);
+            double edge = f.root.ActualWidth() - tray - reserve;
+            Push(f, icons && w > 0 ? -std::max(0.0, last - edge) : 0.0);
+        }
+        else
+        {
+            // Left-aligned icons do not move when the repeater narrows; the margin only
+            // makes the taskbar send icons to its overflow menu before they reach us.
+            // A right margin keeps the repeater's origin, so menus stay put.
+            SetMargin(f.repeater, {f.repeaterMargin.Left, f.repeaterMargin.Top, f.repeaterMargin.Right + tray + reserve, f.repeaterMargin.Bottom});
+            Push(f, 0);
+        }
     }
-    Recenter(f, reserved);
 }
 
 /// Copies a stable frame out of shared memory (seqlock). False if nothing new or wStats
