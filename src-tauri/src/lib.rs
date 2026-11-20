@@ -165,6 +165,9 @@ fn open_settings(handle: AppHandle) {
     show_settings(&handle);
 }
 
+/// The settings window's height, DIPs: every page's button in the sidebar fits.
+const SETTINGS_HEIGHT: f64 = 820.0;
+
 fn show_settings(handle: &AppHandle) {
     if let Some(w) = handle.get_webview_window("settings") {
         if let Ok(hwnd) = w.hwnd() {
@@ -172,9 +175,12 @@ fn show_settings(handle: &AppHandle) {
         }
         return;
     }
+    // Tall enough for the whole sidebar (fourteen pages), within the screen's height.
+    let screen = handle.primary_monitor().ok().flatten().map(|m| m.size().height as f64 / m.scale_factor());
+    let height = screen.map_or(SETTINGS_HEIGHT, |h| SETTINGS_HEIGHT.min(h - 80.0).max(600.0));
     let built = WebviewWindowBuilder::new(handle, "settings", WebviewUrl::App("settings.html".into()))
         .title("wStats")
-        .inner_size(1040.0, 700.0)
+        .inner_size(1040.0, height)
         .min_inner_size(900.0, 600.0)
         .center()
         // Tauri's file-drop handler takes over every drag in the window on Windows,
