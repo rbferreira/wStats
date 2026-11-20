@@ -6,6 +6,7 @@
 use super::icons::{self, Seg, Shape};
 use crate::config::{Label, Look, ModuleId, Side, Tag};
 use crate::stats::Store;
+use crate::stats::peripherals::{self, Peripheral};
 use crate::stats::model::Snapshot;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -69,6 +70,8 @@ pub struct Slot {
     /// two cells line up.
     pub tag_w: f32,
     pub num_w: f32,
+    /// For a devices item: which of the taskbar's peripherals, in order.
+    pub device: u8,
 }
 
 struct Fonts {
@@ -105,6 +108,8 @@ enum Font {
     CompactUnit,
     CompactTag,
     Inside,
+    /// [`Font::Value`] with tabular figures: every digit as wide as the others.
+    TabValue,
 }
 
 impl Fonts {
@@ -175,6 +180,7 @@ impl Fonts {
             Font::CompactUnit => &self.compact_unit,
             Font::CompactTag => &self.compact_tag,
             Font::Inside => &self.inside,
+            Font::TabValue => &self.value,
         }
     }
 }
@@ -223,10 +229,20 @@ fn name(m: ModuleId) -> &'static str {
         ModuleId::Fans => "FAN",
         ModuleId::Power => "PWR",
         ModuleId::Npu => "NPU",
+        ModuleId::Devices => "DEV",
     }
 }
 
 /// Width of the graphic left of the text, in DIPs.
+/// Where an item's side graphic starts, relative to the item, and how wide its box is
+/// (DIPs). The narrow look trims the bolt's empty left edge.
+fn graphic_box(m: ModuleId, look: Look) -> (f32, f32) {
+    match m {
+        ModuleId::Power if narrow(look) => (-1.5, 14.0),
+        _ => (0.0, graphic_width(m)),
+    }
+}
+
 fn graphic_width(m: ModuleId) -> f32 {
     match m {
         ModuleId::Cpu | ModuleId::Gpu | ModuleId::Net => 28.0,
@@ -236,6 +252,7 @@ fn graphic_width(m: ModuleId) -> f32 {
         ModuleId::Temp => 14.0,
         ModuleId::Power => 16.0,
         ModuleId::Npu => 30.0,
+        ModuleId::Devices => 24.0,
     }
 }
 
@@ -243,7 +260,7 @@ fn graphic_width(m: ModuleId) -> f32 {
 fn widest(m: ModuleId) -> Reading {
     let value = |v: &str, unit| Reading::Value { value: v.into(), unit };
     match m {
-        ModuleId::Cpu | ModuleId::Gpu | ModuleId::Mem | ModuleId::Disk | ModuleId::Battery | ModuleId::Npu => value("100", "%"),
+        ModuleId::Cpu | ModuleId::Gpu | ModuleId::Mem | ModuleId::Disk | ModuleId::Battery | ModuleId::Npu | ModuleId::Devices => value("100", "%"),
         ModuleId::Temp => value("100°", ""),
         ModuleId::Fans => value("9999", ""),
         ModuleId::Power => value("999", "W"),
@@ -253,6 +270,11 @@ fn widest(m: ModuleId) -> Reading {
 
 /// The lines of an item's text for a label setting.
 fn lines(m: ModuleId, label: Label, reading: &Reading) -> Vec<Line> {
+    lines_named(name(m), label, reading)
+}
+
+/// [`lines`] with the name given: a peripheral's own.
+fn lines_named(item_name: &str, label: Label, reading: &Reading) -> Vec<Line> {
     // Without a name line above or below, the number grows to fill the bar.
     let big = matches!(label, Label::Side | Label::None);
     let value = || match reading {
@@ -273,7 +295,7 @@ fn lines(m: ModuleId, label: Label, reading: &Reading) -> Vec<Line> {
     };
     // The network's unit rides on the name line, small: the rates below are bare numbers.
     let caption = || {
-        let mut v = vec![part(0.0, name(m), Font::Caption, 0.62)];
+        let mut v = vec![part(0.0, item_name, Font::Caption, 0.62)];
         if let Reading::Rates { unit, .. } = reading {
             v.push(part(3.0, *unit, Font::NetUnit, 0.75));
         }
@@ -298,8 +320,15 @@ fn lines(m: ModuleId, label: Label, reading: &Reading) -> Vec<Line> {
 /// Lays out one piece of text (no wrapping): the layout, its width and its baseline (px).
 fn text_layout(dwrite: &IDWriteFactory, fonts: &Fonts, p: &Part) -> Option<(IDWriteTextLayout, f32, f32)> {
     unsafe {
-        let layout = dwrite.CreateTextLayout(&wide(&p.text), fonts.get(p.font), 4096.0, 4096.0).ok()?;
+        let text = wide(&p.text);
+        let layout = dwrite.CreateTextLayout(&text, fonts.get(p.font), 4096.0, 4096.0).ok()?;
         let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        if p.font == Font::TabValue {
+            if let Ok(t) = dwrite.CreateTypography() {
+                let _ = t.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 });
+                let _ = layout.SetTypography(&t, DWRITE_TEXT_RANGE { startPosition: 0, length: text.len() as u32 });
+            }
+        }
         let mut m = DWRITE_TEXT_METRICS::default();
         layout.GetMetrics(&mut m).ok()?;
         let mut lm = [DWRITE_LINE_METRICS::default()];
@@ -360,13 +389,59 @@ const RING_OUTER: f32 = 11.0;
 /// Room left and right of the text over a history graph, DIPs.
 const GRAPH_TEXT_PAD: f32 = 1.0;
 
-/// The reading drawn over a history graph. Its item is sized for "99 %": a hundred drops
-/// the "%", as in the rings, and takes the same room.
-fn over_graph(reading: Reading) -> Reading {
+/// Whether a look is the narrow one, "inside": every item sized for two digits.
+fn narrow(look: Look) -> bool {
+    look.label == Label::Inside && look.graphics && !look.compact
+}
+
+fn digits(value: &str) -> usize {
+    value.chars().filter(char::is_ascii_digit).count()
+}
+
+/// What a narrow item is sized for: two digits and the unit ("99 %", "99 W", "99°").
+/// Numbers without a unit, like fan speeds, keep their own widest.
+fn narrow_sample(reading: Reading) -> Reading {
     match reading {
-        Reading::Value { value, unit } if unit == "%" && value.chars().filter(char::is_ascii_digit).count() >= 3 => Reading::Value { value, unit: "" },
+        Reading::Value { value, unit } if digits(&value) >= 3 && (!unit.is_empty() || value.ends_with('°')) => {
+            Reading::Value { value: if value.ends_with('°') { "99°".into() } else { "99".into() }, unit }
+        }
         r => r,
     }
+}
+
+/// Lines with tabular figures: an item of the narrow look is sized for "99", so a "1"
+/// as narrow as it is in the font would leave a gap after it.
+fn tabular(mut lines: Vec<Line>) -> Vec<Line> {
+    for p in lines.iter_mut().flat_map(|l| l.parts.iter_mut()) {
+        if p.font == Font::Value {
+            p.font = Font::TabValue;
+        }
+    }
+    lines
+}
+
+/// A reading as a narrow item draws it: from three digits on the unit drops, as in the
+/// rings ("100", "150"), to take the room of two digits and the unit.
+fn narrow_text(reading: Reading) -> Reading {
+    match reading {
+        Reading::Value { value, unit } if digits(&value) >= 3 && (!unit.is_empty() || value.ends_with('°')) => {
+            Reading::Value { value: value.trim_end_matches('°').to_string(), unit: "" }
+        }
+        r => r,
+    }
+}
+
+/// Width of a peripheral's item: its name is its own, so it is measured every time.
+fn device_width(short: &str, look: Look, s: f32) -> f32 {
+    let sample = if narrow(look) { narrow_sample(widest(ModuleId::Devices)) } else { widest(ModuleId::Devices) };
+    let text = measure(s, |dwrite, fonts| {
+        let ls = lines_named(short, look.label, &sample);
+        let ls = if narrow(look) { tabular(ls) } else { ls };
+        ls.iter().map(|l| line_width(dwrite, fonts, l, s)).fold(0.0, f32::max)
+    });
+    let letters = if look.label == Label::Side { 12.0 } else { 0.0 };
+    let graphic = if look.graphics { graphic_width(ModuleId::Devices) + 6.0 } else { 0.0 };
+    (letters + graphic + 1.0) * s + text.unwrap_or(40.0 * s)
 }
 
 /// Width of an item's content (stacked letters, graphic, text), in device pixels.
@@ -375,11 +450,12 @@ fn content_width(m: ModuleId, look: Look, s: f32) -> f32 {
     if let Some(w) = WIDTHS.with(|c| c.borrow().get(&key).copied()) {
         return w;
     }
-    let sample = match (inside(m, look), widest(m)) {
-        (Inside::Graph, Reading::Value { unit: "%", .. }) => Reading::Value { value: "99".into(), unit: "%" },
-        (_, r) => r,
-    };
-    let text = measure(s, |dwrite, fonts| lines(m, look.label, &sample).iter().map(|l| line_width(dwrite, fonts, l, s)).fold(0.0, f32::max));
+    let sample = if narrow(look) { narrow_sample(widest(m)) } else { widest(m) };
+    let text = measure(s, |dwrite, fonts| {
+        let ls = lines(m, look.label, &sample);
+        let ls = if narrow(look) { tabular(ls) } else { ls };
+        ls.iter().map(|l| line_width(dwrite, fonts, l, s)).fold(0.0, f32::max)
+    });
     let w = match inside(m, look) {
         Inside::Graph => Some(text.unwrap_or(40.0 * s) + 2.0 * GRAPH_TEXT_PAD * s),
         // The caption is the widest thing under a ring.
@@ -391,7 +467,7 @@ fn content_width(m: ModuleId, look: Look, s: f32) -> f32 {
         return w;
     }
     let letters = if look.label == Label::Side { 12.0 } else { 0.0 };
-    let graphic = if look.graphics { graphic_width(m) + 6.0 } else { 0.0 };
+    let graphic = if look.graphics { graphic_box(m, look).1 + 6.0 } else { 0.0 };
     let w = (letters + graphic + 1.0) * s + text.unwrap_or(40.0 * s);
     WIDTHS.with(|c| c.borrow_mut().insert(key, w));
     w
@@ -434,7 +510,7 @@ fn compact_value(value: String, unit: &str) -> Vec<Part> {
 }
 
 /// Widths (px) of a compact cell's tag and of its widest number.
-fn compact_widths(m: ModuleId, tag: Tag, s: f32) -> (f32, f32) {
+fn compact_widths(m: ModuleId, short: Option<&str>, tag: Tag, s: f32) -> (f32, f32) {
     measure(s, |dwrite, fonts| {
         let w = |parts: Vec<Part>| line_width(dwrite, fonts, &Line { baseline: 0.0, parts }, s);
         let tag_w = match (m, tag) {
@@ -443,7 +519,7 @@ fn compact_widths(m: ModuleId, tag: Tag, s: f32) -> (f32, f32) {
             (ModuleId::Cpu | ModuleId::Gpu, Tag::Graphic) => MINI_GRAPH * s,
             (_, Tag::Graphic) => MINI * s,
             (_, Tag::Icon) => ICON * s,
-            (_, Tag::Label) => w(vec![part(0.0, name(m), Font::CompactTag, 1.0)]),
+            (_, Tag::Label) => w(vec![part(0.0, short.unwrap_or(name(m)), Font::CompactTag, 1.0)]),
         };
         let num_w = match widest(m) {
             Reading::Value { value, unit } => w(compact_value(value, unit)),
@@ -454,14 +530,27 @@ fn compact_widths(m: ModuleId, tag: Tag, s: f32) -> (f32, f32) {
     .unwrap_or((ICON * s, 40.0 * s))
 }
 
-fn compact_layout(modules: &[ModuleId], tag: Tag, scale: f32) -> (Vec<Slot>, i32) {
+fn compact_layout(modules: &[ModuleId], devices: &[String], tag: Tag, scale: f32) -> (Vec<Slot>, i32) {
     let mut x = 0.0;
     let mut slots = Vec::new();
+    let mut device = 0u8;
     for (i, col) in columns(modules).iter().enumerate() {
         if i > 0 {
             x += ITEM_GAP * scale;
         }
-        let (tag_w, num_w) = col.iter().map(|&m| compact_widths(m, tag, scale)).fold((0.0f32, 0.0f32), |(a, b), (t, n)| (a.max(t), b.max(n)));
+        // Which peripheral each devices cell of the column is.
+        let ids: Vec<u8> = col
+            .iter()
+            .map(|&m| {
+                let d = device;
+                if m == ModuleId::Devices {
+                    device += 1;
+                }
+                d
+            })
+            .collect();
+        let short = |m: ModuleId, d: u8| if m == ModuleId::Devices { devices.get(d as usize).map(String::as_str) } else { None };
+        let (tag_w, num_w) = col.iter().zip(&ids).map(|(&m, &d)| compact_widths(m, short(m, d), tag, scale)).fold((0.0f32, 0.0f32), |(a, b), (t, n)| (a.max(t), b.max(n)));
         let w = (tag_w + TAG_GAP * scale + num_w + 2.0 * ITEM_PAD * scale).round();
         for (k, &m) in col.iter().enumerate() {
             let row = match (col.len(), k) {
@@ -469,7 +558,7 @@ fn compact_layout(modules: &[ModuleId], tag: Tag, scale: f32) -> (Vec<Slot>, i32
                 (_, 0) => Row::Top,
                 _ => Row::Bottom,
             };
-            slots.push(Slot { module: m, x: x.round() as i32, w: w as i32, row, tag_w, num_w });
+            slots.push(Slot { module: m, x: x.round() as i32, w: w as i32, row, tag_w, num_w, device: ids[k] });
         }
         x += w;
     }
@@ -501,18 +590,28 @@ fn item_pad(look: Look) -> f32 {
     }
 }
 
-pub fn layout(modules: &[ModuleId], look: Look, scale: f32) -> (Vec<Slot>, i32) {
+/// Lays the items out; `devices` are the short names of the peripherals that the
+/// devices items stand for, in order.
+pub fn layout(modules: &[ModuleId], devices: &[String], look: Look, scale: f32) -> (Vec<Slot>, i32) {
     if look.compact {
-        return compact_layout(modules, look.tag, scale);
+        return compact_layout(modules, devices, look.tag, scale);
     }
     let mut x = 0.0;
     let mut slots = Vec::new();
+    let mut device = 0u8;
     for (i, &m) in modules.iter().enumerate() {
         if i > 0 {
             x += ITEM_GAP * scale;
         }
-        let w = (content_width(m, look, scale) + 2.0 * item_pad(look) * scale).round();
-        slots.push(Slot { module: m, x: x.round() as i32, w: w as i32, row: Row::Full, tag_w: 0.0, num_w: 0.0 });
+        let d = device;
+        let content = if m == ModuleId::Devices {
+            device += 1;
+            device_width(devices.get(d as usize).map_or("", String::as_str), look, scale)
+        } else {
+            content_width(m, look, scale)
+        };
+        let w = (content + 2.0 * item_pad(look) * scale).round();
+        slots.push(Slot { module: m, x: x.round() as i32, w: w as i32, row: Row::Full, tag_w: 0.0, num_w: 0.0, device: d });
         x += w;
     }
     (slots, x.round() as i32)
@@ -637,6 +736,7 @@ impl Renderer {
             let brush = self.target.CreateSolidColorBrush(&fg.d2d(), None)?;
             // Designs are drawn for a 48-DIP bar; a taller or shorter one centres them.
             let oy = (h as f32 / s - 48.0) / 2.0;
+            let devices: Vec<&Peripheral> = peripherals::on_taskbar(&store.snapshot.peripherals).collect();
             let ctx = Ctx { r: self, brush: &brush, fg, s, h: h as f32, oy, look: frame.look, primary: frame.primary, secondary: frame.secondary };
             for (i, slot) in frame.slots.iter().enumerate() {
                 let x = slot.x as f32;
@@ -660,8 +760,18 @@ impl Renderer {
                 let pad = if frame.look.compact { ITEM_PAD } else { item_pad(frame.look) };
                 let left = x + pad * s;
                 let width = slot.w as f32 - 2.0 * pad * s;
+                let device = if slot.module == ModuleId::Devices {
+                    match devices.get(slot.device as usize) {
+                        Some(p) => Some(*p),
+                        None => continue, // the list changed since the layout
+                    }
+                } else {
+                    None
+                };
                 if frame.look.compact {
-                    ctx.compact(slot, left, &store.snapshot, &store.history);
+                    ctx.compact(slot, left, &store.snapshot, &store.history, device);
+                } else if let Some(p) = device {
+                    ctx.device_item(left, width, p);
                 } else {
                     ctx.item(slot.module, left, width, &store.snapshot, &store.history);
                 }
@@ -1150,6 +1260,7 @@ impl Ctx<'_> {
                 Reading::Rates { up, down, unit }
             }
             ModuleId::Npu => snap.npu.as_ref().map_or_else(none, |n| pct(n.util)),
+            ModuleId::Devices => none(), // drawn by device_item, from the device
         }
     }
 
@@ -1174,9 +1285,12 @@ impl Ctx<'_> {
             Inside::Ring => return self.inside_ring(m, x, w, snap),
             Inside::No => {}
         }
-        let gw = graphic_width(m) * s;
-        self.graphic(m, x, gw, snap, hist);
-        self.draw_lines(x + gw + 6.0 * s, &lines(m, self.look.label, &self.reading(m, snap)));
+        let (dx, gw) = graphic_box(m, self.look);
+        let gw = gw * s;
+        self.graphic(m, x + dx * s, gw, snap, hist);
+        let reading = if narrow(self.look) { narrow_text(self.reading(m, snap)) } else { self.reading(m, snap) };
+        let ls = lines(m, self.look.label, &reading);
+        self.draw_lines(x + gw + 6.0 * s, &if narrow(self.look) { tabular(ls) } else { ls });
     }
 
     /// The graphic left of an item's text, `gw` px wide from `x`.
@@ -1207,12 +1321,13 @@ impl Ctx<'_> {
             ModuleId::Fans => self.fan(x),
             ModuleId::Power => self.bolt(x),
             ModuleId::Npu => self.chip(x, snap.npu.as_ref().map(|n| n.util / 100.0)),
+            ModuleId::Devices => {}
         }
     }
 
     /// Compact mode: one cell, its tag on one side and its number on the other, lined
     /// up with the other cell of its column. Numbers are right-aligned.
-    fn compact(&self, slot: &Slot, x: f32, snap: &Snapshot, hist: &crate::stats::model::History) {
+    fn compact(&self, slot: &Slot, x: f32, snap: &Snapshot, hist: &crate::stats::model::History, device: Option<&Peripheral>) {
         let s = self.s;
         let gap = TAG_GAP * s;
         let (tag_x, num_x) = match self.look.side {
@@ -1251,6 +1366,20 @@ impl Ctx<'_> {
             Row::Bottom => BOTTOM_BASE,
             Row::Full => FULL_BASE,
         };
+        if let Some(p) = device {
+            let y = self.y(baseline - 4.8);
+            match self.look.tag {
+                Tag::Label => self.draw_lines(tag_x, &[Line { baseline, parts: vec![part(0.0, p.short_name(), Font::CompactTag, 0.62)] }]),
+                Tag::Icon => self.icon_shapes(icons::kind_shapes(p.kind), tag_x, y - ICON * s / 2.0, ICON * s, self.fg.alpha(0.75)),
+                Tag::Graphic => {
+                    // The battery, filled to the level.
+                    let (h, cx) = (MINI * s, tag_x + MINI * s / 2.0);
+                    self.scaled(h / (27.0 * s), (tag_x + 6.5 * s, self.y(24.0)), (cx, y), || self.battery(tag_x, Some(p.percent as f32 / 100.0), p.charging));
+                }
+            }
+            number(compact_value(p.percent.to_string(), "%"), baseline);
+            return;
+        }
         match self.look.tag {
             Tag::Label => self.draw_lines(tag_x, &[Line { baseline, parts: vec![part(0.0, name(slot.module), Font::CompactTag, 0.62)] }]),
             // Centred on the digits' middle, a little under half their height.
@@ -1260,6 +1389,53 @@ impl Ctx<'_> {
         if let Reading::Value { value, unit } = self.reading(slot.module, snap) {
             number(compact_value(value, unit), baseline);
         }
+    }
+
+    /// A peripheral: its kind's icon over a battery meter, then its level and name.
+    fn device_item(&self, x: f32, w: f32, p: &Peripheral) {
+        let s = self.s;
+        let short = p.short_name();
+        let x = match (self.look.label, self.look.side) {
+            (Label::Side, Side::Left) => self.letters(&short.chars().take(3).collect::<String>(), x) + 4.0 * s,
+            (Label::Side, Side::Right) => {
+                self.letters(&short.chars().take(3).collect::<String>(), x + w - 8.0 * s);
+                x
+            }
+            _ => x,
+        };
+        let mut reading = Reading::Value { value: p.percent.to_string(), unit: "%" };
+        if narrow(self.look) {
+            reading = narrow_text(reading);
+        }
+        let lines = lines_named(&short, self.look.label, &reading);
+        let lines = if narrow(self.look) { tabular(lines) } else { lines };
+        if !self.look.graphics {
+            self.draw_lines(x, &lines);
+            return;
+        }
+        let gw = graphic_width(ModuleId::Devices) * s;
+        self.device_graphic(x, gw, p);
+        self.draw_lines(x + gw + 6.0 * s, &lines);
+    }
+
+    /// The kind's line icon with a meter under it: red at 20% or less, the secondary
+    /// colour while charging.
+    fn device_graphic(&self, x: f32, gw: f32, p: &Peripheral) {
+        let s = self.s;
+        let size = 20.0 * s;
+        self.icon_shapes(icons::kind_shapes(p.kind), x + (gw - size) / 2.0, self.y(9.5), size, self.fg.alpha(0.9));
+        let (my, mh) = (self.y(33.5), 4.5 * s);
+        self.round_rect(x, my, gw, mh, mh / 2.0, self.fg.alpha(0.2));
+        let frac = p.percent as f32 / 100.0;
+        let color = if p.charging {
+            self.secondary
+        } else if p.percent <= 20 {
+            Rgba::RED
+        } else {
+            self.primary
+        };
+        let fill = (gw * frac.clamp(0.0, 1.0)).max(mh);
+        self.round_rect(x, my, fill, mh, mh / 2.0, color);
     }
 
     /// Draws `lines` centred in `w` px from `x`, each on its own.
@@ -1281,7 +1457,7 @@ impl Ctx<'_> {
             ModuleId::Npu => self.graph(x, w, &[(hist.npu.last_n(64).collect(), self.primary.alpha(FADE))], 100.0, false),
             _ => self.mirror(x, w, &hist.net_up.last_n(64).collect::<Vec<_>>(), &hist.net_down.last_n(64).collect::<Vec<_>>(), FADE, false),
         }
-        self.centred(x, w, &lines(m, Label::Bottom, &over_graph(self.reading(m, snap))));
+        self.centred(x, w, &tabular(lines(m, Label::Bottom, &narrow_text(self.reading(m, snap)))));
     }
 
     /// `Label::Inside`, ring items: the number in the ring, the name under it. The disk
@@ -1356,13 +1532,17 @@ impl Ctx<'_> {
                 let (from, k) = full(8.5, 28.0);
                 self.scaled(k, from, (cx, cy), || self.bolt(x));
             }
-            ModuleId::Net => {}
+            ModuleId::Net | ModuleId::Devices => {}
         }
     }
 
     /// One of the settings window's line icons, `size` px square with its corner at
     /// (x, y): stroked like the SVG (1.7 of 24 units, round ends and joins).
     fn icon(&self, m: ModuleId, x: f32, y: f32, size: f32, color: Rgba) {
+        self.icon_shapes(icons::shapes(m), x, y, size, color);
+    }
+
+    fn icon_shapes(&self, shapes: &[Shape], x: f32, y: f32, size: f32, color: Rgba) {
         let k = size / 24.0;
         let at = |px: f32, py: f32| Vector2 { X: x + px * k, Y: y + py * k };
         let stroke = (1.7 * k).max(1.0);
@@ -1374,7 +1554,7 @@ impl Ctx<'_> {
         let ellipse = |cx: f32, cy: f32, rx: f32, ry: f32| D2D1_ELLIPSE { point: at(cx, cy), radiusX: rx * k, radiusY: ry * k };
         let brush = self.color(color);
         unsafe {
-            for shape in icons::shapes(m) {
+            for shape in shapes {
                 match *shape {
                     Shape::Path(d) => {
                         if let Some(g) = self.path(&icons::parse(d), &at, k, false) {
@@ -1496,6 +1676,10 @@ mod tests {
         store.snapshot.net.down = 8.0 * 1024.0;
         store.snapshot.cpu.total = 36.0;
         store.snapshot.gpus[0].util = 10.0;
+        use crate::stats::peripherals::{Kind, Peripheral, Via};
+        let dev = |name: &str, kind, percent, charging| Peripheral { id: name.into(), name: name.into(), kind, via: Via::Logitech, percent, charging, connected: true, seen: 1, shown: true };
+        store.snapshot.peripherals =
+            vec![dev("MX Master 3S", Kind::Mouse, 60, false), dev("MX Mechanical Mini", Kind::Keyboard, 15, false), dev("QCY MeloBuds Pro", Kind::Headset, 40, true)];
         store
     }
 
@@ -1537,6 +1721,16 @@ mod tests {
         }
         shots("inside", Look { label: Label::Inside, ..Look::default() });
         let mine = [ModuleId::Cpu, ModuleId::Gpu, ModuleId::Npu, ModuleId::Mem, ModuleId::Disk, ModuleId::Net, ModuleId::Temp, ModuleId::Fans];
+        let devs = [ModuleId::Devices, ModuleId::Devices, ModuleId::Devices];
+        for (name, look) in [
+            ("devices-bottom", Look { label: Label::Bottom, ..Look::default() }),
+            ("devices-top", Look::default()),
+            ("devices-compact-icon", Look { compact: true, ..Look::default() }),
+            ("devices-compact-graphic", Look { compact: true, tag: Tag::Graphic, ..Look::default() }),
+            ("devices-compact-label", Look { compact: true, tag: Tag::Label, ..Look::default() }),
+        ] {
+            save(&format!("{name}-dark.png"), preview_png(&devs, look, &store, false, colors, 2.0));
+        }
         for (name, look) in [
             ("mine-bottom", Look { label: Label::Bottom, ..Look::default() }),
             ("mine-inside", Look { label: Label::Inside, ..Look::default() }),
@@ -1559,6 +1753,8 @@ mod tests {
             idle.history.record(&snap);
         }
         idle.snapshot = snap;
+        let right = [ModuleId::Temp, ModuleId::Fans, ModuleId::Power, ModuleId::Devices, ModuleId::Devices];
+        save("mine-inside-right-dark.png", preview_png(&right, Look { label: Label::Inside, ..Look::default() }, &idle, false, colors, 2.0));
         save("mine-inside-idle-dark.png", preview_png(&mine, Look { label: Label::Inside, ..Look::default() }, &idle, false, colors, 2.0));
         for (tag, t) in [(Tag::Icon, "icon"), (Tag::Label, "label"), (Tag::Graphic, "graphic")] {
             for (side, sd) in [(Side::Left, "left"), (Side::Right, "right")] {
@@ -1571,12 +1767,25 @@ mod tests {
     }
 
     #[test]
+    fn narrow_items_use_tabular_figures() {
+        let width = |value: &str| {
+            let ls = tabular(lines(ModuleId::Fans, Label::Bottom, &Reading::Value { value: value.into(), unit: "" }));
+            measure(2.0, |dwrite, fonts| line_width(dwrite, fonts, &ls[0], 2.0)).unwrap()
+        };
+        assert!((width("1111") - width("9999")).abs() < 0.01, "{} vs {}", width("1111"), width("9999"));
+    }
+
+    #[test]
     fn a_hundred_fits_where_99_percent_does() {
         let width = |value: &str, unit| {
-            let reading = over_graph(Reading::Value { value: value.into(), unit });
+            let reading = narrow_text(Reading::Value { value: value.into(), unit });
             measure(2.0, |dwrite, fonts| line_width(dwrite, fonts, &lines(ModuleId::Cpu, Label::Bottom, &reading)[0], 2.0)).unwrap()
         };
         assert!(width("100", "%") <= width("99", "%"), "{} > {}", width("100", "%"), width("99", "%"));
+        assert!(width("150", "W") <= width("99", "W"));
+        // A degree is narrower than a digit: a hundred degrees overflows into the
+        // item's padding, never past it.
+        assert!(width("100°", "") <= width("99°", "") + INSIDE_PAD * 2.0);
         // Below a hundred the unit stays.
         assert!(width("42", "%") > width("42", ""));
     }
@@ -1603,7 +1812,7 @@ mod tests {
         use ModuleId::*;
         let cols = columns(&[Cpu, Gpu, Npu, Net, Mem, Disk, Power]);
         assert_eq!(cols, vec![vec![Cpu, Gpu], vec![Npu], vec![Net], vec![Mem, Disk], vec![Power]]);
-        let (slots, _) = layout(&[Cpu, Gpu, Net, Power], Look { compact: true, ..Look::default() }, 1.0);
+        let (slots, _) = layout(&[Cpu, Gpu, Net, Power], &[], Look { compact: true, ..Look::default() }, 1.0);
         let rows: Vec<Row> = slots.iter().map(|s| s.row).collect();
         assert_eq!(rows, vec![Row::Top, Row::Bottom, Row::Full, Row::Full]);
         // A column's two cells share it.
@@ -1620,7 +1829,7 @@ mod tests {
 
     #[test]
     fn layout_is_contiguous() {
-        let (slots, width) = layout(&[ModuleId::Net, ModuleId::Cpu], Look::default(), 1.75);
+        let (slots, width) = layout(&[ModuleId::Net, ModuleId::Cpu], &[], Look::default(), 1.75);
         assert_eq!(slots[0].x, 0);
         assert_eq!(slots[1].x, slots[0].w + (ITEM_GAP * 1.75f32).round() as i32);
         assert_eq!(width, slots[1].x + slots[1].w);
@@ -1631,7 +1840,8 @@ mod tests {
 /// `scale` 2 keeps it crisp on high-DPI screens; the page draws it at half size.
 pub fn preview_png(modules: &[ModuleId], look: Look, store: &Store, light: bool, colors: (Rgba, Rgba), scale: f32) -> Option<String> {
     use base64::Engine;
-    let (slots, width) = layout(modules, look, scale);
+    let devices: Vec<String> = peripherals::on_taskbar(&store.snapshot.peripherals).map(|p| p.short_name()).collect();
+    let (slots, width) = layout(modules, &devices, look, scale);
     let frame = Frame {
         slots,
         width,

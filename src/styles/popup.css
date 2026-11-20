@@ -648,3 +648,61 @@ img.app-icon:not([src]) {
   color: #fff;
   background: var(--blue);
 }
+
+/* ---- wireless devices ----------------------------------------------------------- */
+
+.dev {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 64px 38px;
+  align-items: center;
+  column-gap: 10px;
+  padding: 6px 0;
+}
+
+.dev + .dev {
+  border-top: 1px solid var(--border);
+}
+
+.dev.off {
+  opacity: 0.55;
+}
+
+.dev-icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.dev-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dev-sub {
+  color: var(--text-2);
+  font-size: 11px;
+  margin-top: 1px;
+}
+
+.dev-meter {
+  height: 6px;
+}
+
+.dev-pct {
+  text-align: right;
+  font-weight: 600;
+}
+
+.dev-section {
+  color: var(--text-2);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 10px 0 2px;
+}
+
+.dev-empty {
+  color: var(--text-2);
+  margin: 0;
+}

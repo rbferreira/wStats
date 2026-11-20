@@ -231,6 +231,8 @@ impl App {
         }
         self.control.interval_ms.store(s.interval_ms, Ordering::Relaxed);
         *self.control.fans.write() = stats::FanPrefs { hidden: s.hidden_fans.clone(), bar: s.bar_fan.clone() };
+        *self.control.devices.write() = s.devices.clone();
+        self.control.devices_on.store(s.modules.contains(&config::ModuleId::Devices), Ordering::Relaxed);
         if let Some(p) = &self.control.pinger {
             *p.host.write() = s.ping_host.clone();
         }
@@ -360,11 +362,13 @@ pub fn run() {
             }
 
             let data_dir = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("wStats"));
-            let store = stats::new_store(data_dir.map(|d| d.join("history.json")));
+            let store = stats::new_store(data_dir.as_ref().map(|d| d.join("history.json")));
             let control = Arc::new(Control {
                 interval_ms: settings.interval_ms.into(),
                 fans: stats::FanPrefs { hidden: settings.hidden_fans.clone(), bar: settings.bar_fan.clone() }.into(),
                 pinger: Some(stats::ping::Pinger::spawn(settings.ping_host.clone())),
+                devices: settings.devices.clone().into(),
+                devices_on: settings.modules.contains(&config::ModuleId::Devices).into(),
                 ..Default::default()
             });
             let strip_shared = Arc::new(strip::Shared::default());
@@ -399,7 +403,7 @@ pub fn run() {
                     }
                 }
             };
-            stats::spawn(store.clone(), control, tick);
+            stats::spawn(store.clone(), control, data_dir.map(|d| d.join("peripherals.json")), tick);
 
             let on_strip = {
                 let (handle, app) = (handle.clone(), app.clone());

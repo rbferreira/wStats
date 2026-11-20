@@ -18,6 +18,8 @@ pub enum ModuleId {
     Fans,
     Power,
     Npu,
+    /// Wireless peripherals: one strip item per device picked in Settings.
+    Devices,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -139,6 +141,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// The release already announced with a notification, so it is announced once.
     pub update_notified: Option<String>,
+    /// Peripherals (ids) picked to show on the taskbar, each as an item of its own.
+    pub devices: Vec<String>,
 }
 
 /// The two colours every chart is built from, as `#RRGGBB`.
@@ -177,6 +181,7 @@ impl Default for Settings {
             bar_fan: None,
             check_updates: true,
             update_notified: None,
+            devices: Vec::new(),
         }
     }
 }

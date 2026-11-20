@@ -19,7 +19,7 @@ Bonito, leve e sempre à vista.
 
 ## O que é
 
-O wStats coloca pequenos gráficos de **CPU, GPU, NPU, memória, disco, rede, bateria, temperatura, ventoinhas e consumo de energia** direto na barra de tarefas. Clicar num item abre um painel com os detalhes: histórico de até 24 horas, processos, núcleos, sensores e atalhos para as ferramentas do Windows.
+O wStats coloca pequenos gráficos de **CPU, GPU, NPU, memória, disco, rede, bateria, temperatura, ventoinhas e consumo de energia**, além da bateria do seu mouse, teclado, fone ou controle sem fio, direto na barra de tarefas. Clicar num item abre um painel com os detalhes: histórico de até 24 horas, processos, núcleos, sensores e atalhos para as ferramentas do Windows.
 
 A diferença para outros monitores é que **o wStats faz parte da barra**: ele não flutua por cima dela. Os ícones de apps abrem espaço para ele como fazem com o botão de Widgets, e tudo se reorganiza quando você liga ou desliga um item.
 
@@ -57,6 +57,7 @@ Para quem quer a barra livre, o **modo compacto** põe dois itens por coluna, s�
 | **Temperatura** | termômetro que sobe com a temperatura e muda de cor: na cor do tema até 70°, amarelo, laranja e vermelho a partir de 90° | cada núcleo, sensores da placa-mãe (desktop) ou da placa (Dell), GPU, histórico de 24 h |
 | **Ventoinhas** | a mais rápida, em RPM | cada ventoinha (conectores da placa-mãe em desktops, notebooks Dell, GPU), histórico, perfil térmico da BIOS (Dell) |
 | **Alimentação** | consumo da CPU em watts | consumo por componente (RAPL), GPU (NVIDIA), bateria, histórico de 24 h |
+| **Dispositivos** | um item para cada dispositivo sem fio que você escolher: o tipo, a bateria e um medidor (vermelho com 20% ou menos); some enquanto ele estiver desconectado | todos os dispositivos encontrados, os desconectados com a última leitura e há quanto tempo |
 
 E também:
 
@@ -66,6 +67,7 @@ E também:
 - **Legenda do seu jeito**: em cima, embaixo, ao lado, sem, ou o número dentro do gráfico, com prévia ao vivo nas Configurações. Os gráficos também podem ser desligados, deixando só o texto.
 - **Modo compacto**: dois itens por coluna, só com os números, identificados por ícone, legenda ou gráfico pequeno, à esquerda ou à direita. Ocupa menos da metade do espaço.
 - **Ordem dos itens** ajustável arrastando nas Configurações.
+- **Dispositivos sem fio** lidos sem o software do fabricante: aparelhos Bluetooth cuja bateria o Windows informa, mouses, teclados e headsets Logitech (HID++, por receptor Unifying, Bolt ou Lightspeed, cabo ou Bluetooth), controles Xbox, DualSense e DualShock 4, e receptores USB que informam a bateria. Só são enviadas consultas; o wStats não altera nada nos aparelhos.
 - **Português e inglês**, seguindo o idioma do Windows ou escolhido nas Configurações; o instalador também é bilíngue.
 - **Economizar memória**: descarrega os painéis depois de 1 minuto sem uso, e o wStats cai para cerca de 18 MB (com os painéis sempre prontos, fica em torno de 110 MB, quase tudo do WebView2).
 - **Iniciar com o Windows**, menu na bandeja e no clique direito da barra.
