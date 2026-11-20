@@ -391,9 +391,10 @@ const RING_OUTER: f32 = 11.0;
 /// Room left and right of the text over a history graph, DIPs.
 const GRAPH_TEXT_PAD: f32 = 1.0;
 
-/// Whether a look is the narrow one, "inside": every item sized for two digits.
+/// Whether a look's items are sized for two digits: every look but the compact one,
+/// whose numbers line up in columns.
 fn narrow(look: Look) -> bool {
-    look.label == Label::Inside && look.graphics && !look.compact
+    !look.compact
 }
 
 fn digits(value: &str) -> usize {
@@ -578,19 +579,10 @@ pub struct Renderer {
     decimal: char,
 }
 
-pub const ITEM_PAD: f32 = 5.0;
+/// Room left and right of an item's content, DIPs: with the gap, 8 DIPs between items
+/// in every look.
+pub const ITEM_PAD: f32 = 3.0;
 pub const ITEM_GAP: f32 = 2.0;
-/// Padding of the items in the "inside" look, the narrow one: 8 DIPs between items.
-const INSIDE_PAD: f32 = 3.0;
-
-/// Room left and right of an item's content, DIPs.
-fn item_pad(look: Look) -> f32 {
-    if look.label == Label::Inside && look.graphics && !look.compact {
-        INSIDE_PAD
-    } else {
-        ITEM_PAD
-    }
-}
 
 /// Lays the items out; `devices` are the short names of the peripherals that the
 /// devices items stand for, in order.
@@ -612,7 +604,7 @@ pub fn layout(modules: &[ModuleId], devices: &[String], look: Look, scale: f32) 
         } else {
             content_width(m, look, scale)
         };
-        let w = (content + 2.0 * item_pad(look) * scale).round();
+        let w = (content + 2.0 * ITEM_PAD * scale).round();
         slots.push(Slot { module: m, x: x.round() as i32, w: w as i32, row: Row::Full, tag_w: 0.0, num_w: 0.0, device: d });
         x += w;
     }
@@ -783,9 +775,8 @@ impl Renderer {
                     };
                     ctx.round_rect(x, top, slot.w as f32, bottom - top, 5.0 * s, fg.alpha(a));
                 }
-                let pad = if frame.look.compact { ITEM_PAD } else { item_pad(frame.look) };
-                let left = x + pad * s;
-                let width = slot.w as f32 - 2.0 * pad * s;
+                let left = x + ITEM_PAD * s;
+                let width = slot.w as f32 - 2.0 * ITEM_PAD * s;
                 let device = if slot.module == ModuleId::Devices {
                     match devices.get(slot.device as usize) {
                         Some(p) => Some(*p),
@@ -1014,8 +1005,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// The latency's history as a line, each stretch in the colour of its value (green,
-    /// yellow above 80 ms); a ping without an answer breaks the line with a red tick at
+    /// The latency's history as a line, each stretch in the colour of its value (the
+    /// theme colour, yellow above 80 ms); a ping without an answer breaks the line with a red tick at
     /// the top. The scale is the window's peak, never under 40 ms, so that a quiet
     /// connection's jitter does not fill the box.
     fn latency_line(&self, x: f32, y: f32, w: f32, h: f32, data: &[f32], alpha: f32, frame: bool) {
@@ -1042,7 +1033,7 @@ impl Ctx<'_> {
                 continue;
             }
             if i > 0 && tail[i - 1] >= 0.0 {
-                let color = self.color(latency_color(Some(v as u32)).alpha(alpha));
+                let color = self.color(latency_color(Some(v as u32), self.primary).alpha(alpha));
                 unsafe {
                     self.t().DrawLine(Vector2 { X: px(i - 1), Y: py(tail[i - 1]) }, Vector2 { X: px(i), Y: py(v) }, color, stroke, &self.r.round);
                 }
@@ -1337,7 +1328,9 @@ impl Ctx<'_> {
             _ => x,
         };
         if !self.look.graphics {
-            self.draw_lines(x, &lines(m, self.look.label, &self.reading(m, snap)));
+            let reading = if narrow(self.look) { narrow_text(self.reading(m, snap)) } else { self.reading(m, snap) };
+            let ls = lines(m, self.look.label, &reading);
+            self.draw_lines(x, &if narrow(self.look) { tabular(ls) } else { ls });
             return;
         }
         match inside(m, self.look) {
@@ -1687,13 +1680,13 @@ impl Ctx<'_> {
 }
 
 /// Used fraction of C: (or the first volume).
-/// The latency's colour, as the network popup's dot: green, yellow above 80 ms, red
-/// without an answer.
-fn latency_color(ms: Option<u32>) -> Rgba {
+/// The latency's colour, as the thermometer's: the theme colour `normal`, yellow above
+/// 80 ms, red without an answer.
+fn latency_color(ms: Option<u32>, normal: Rgba) -> Rgba {
     match ms {
         None => Rgba::RED,
         Some(ms) if ms > 80 => Rgba::YELLOW,
-        Some(_) => Rgba::GREEN,
+        Some(_) => normal,
     }
 }
 
@@ -1910,7 +1903,7 @@ mod tests {
         assert!(width("150", "W") <= width("99", "W"));
         // A degree is narrower than a digit: a hundred degrees overflows into the
         // item's padding, never past it.
-        assert!(width("100°", "") <= width("99°", "") + INSIDE_PAD * 2.0);
+        assert!(width("100°", "") <= width("99°", "") + ITEM_PAD * 2.0);
         // Below a hundred the unit stays.
         assert!(width("42", "%") > width("42", ""));
     }
