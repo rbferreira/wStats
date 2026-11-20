@@ -617,11 +617,10 @@ impl State {
     /// Fires an event after releasing the state borrow: handlers may pump messages.
     fn emit(event: Event) {
         STATE.with(|st| {
-            if let Ok(g) = st.try_borrow() {
-                if let Some(s) = g.as_ref() {
+            if let Ok(g) = st.try_borrow()
+                && let Some(s) = g.as_ref() {
                     (s.on_event)(event);
                 }
-            }
         });
     }
 }

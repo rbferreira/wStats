@@ -128,7 +128,7 @@ impl Ddv {
 
 /// Fan entries are 3 bytes (type, RPM as u16 LE), the list ends with 0xFF.
 pub fn parse_fans(raw: &[u8]) -> Vec<Fan> {
-    raw.chunks_exact(3)
+    raw.as_chunks::<3>().0.iter()
         .take_while(|c| c[0] != 0xFF)
         .map(|c| Fan { kind: c[0], rpm: u16::from_le_bytes([c[1], c[2]]) })
         .collect()
@@ -137,7 +137,7 @@ pub fn parse_fans(raw: &[u8]) -> Vec<Fan> {
 /// Thermal entries are 5 bytes (type, current, min, max, unknown), then a 0xFF byte.
 pub fn parse_thermals(raw: &[u8]) -> Vec<Thermal> {
     let entries = raw.len().saturating_sub(1) / 5;
-    raw.chunks_exact(5).take(entries).map(|c| Thermal { kind: c[0], celsius: c[1] as i8 }).collect()
+    raw.as_chunks::<5>().0.iter().take(entries).map(|c| Thermal { kind: c[0], celsius: c[1] as i8 }).collect()
 }
 
 unsafe fn string_prop(obj: &IWbemClassObject, name: &str) -> Option<BSTR> {

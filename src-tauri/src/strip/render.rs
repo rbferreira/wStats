@@ -326,12 +326,11 @@ fn text_layout(dwrite: &IDWriteFactory, fonts: &Fonts, p: &Part) -> Option<(IDWr
         let text = wide(&p.text);
         let layout = dwrite.CreateTextLayout(&text, fonts.get(p.font), 4096.0, 4096.0).ok()?;
         let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        if p.font == Font::TabValue {
-            if let Ok(t) = dwrite.CreateTypography() {
+        if p.font == Font::TabValue
+            && let Ok(t) = dwrite.CreateTypography() {
                 let _ = t.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 });
                 let _ = layout.SetTypography(&t, DWRITE_TEXT_RANGE { startPosition: 0, length: text.len() as u32 });
             }
-        }
         let mut m = DWRITE_TEXT_METRICS::default();
         layout.GetMetrics(&mut m).ok()?;
         let mut lm = [DWRITE_LINE_METRICS::default()];
@@ -666,11 +665,10 @@ impl Renderer {
 
     /// (Re)creates the backing DIB when the strip size changes.
     fn surface(&mut self, w: i32, h: i32) -> Result<HDC> {
-        if let Some((dc, _, _, cw, ch, _)) = self.dib {
-            if cw == w && ch == h {
+        if let Some((dc, _, _, cw, ch, _)) = self.dib
+            && cw == w && ch == h {
                 return Ok(dc);
             }
-        }
         self.free_surface();
         unsafe {
             let screen = GetDC(None);
@@ -1009,11 +1007,10 @@ impl Ctx<'_> {
             }
             // Without its box, an idle graph keeps a baseline: it shows the item's width,
             // so the spacing reads the same at 0 % as at 100 %.
-            if !frame && top == base {
-                if let Some((_, color)) = layers.first() {
+            if !frame && top == base
+                && let Some((_, color)) = layers.first() {
                     self.rect(bx, base - 1.0, bar, 1.0, *color);
                 }
-            }
         }
     }
 
@@ -1201,8 +1198,8 @@ impl Ctx<'_> {
         // back to the start. The bulb is open where the tube enters it, with no seams.
         let neck = (bulb * bulb - tube * tube).sqrt(); // where the tube's sides meet the bulb
         unsafe {
-            if let Ok(geo) = self.r.factory.CreatePathGeometry() {
-                if let Ok(sink) = geo.Open() {
+            if let Ok(geo) = self.r.factory.CreatePathGeometry()
+                && let Ok(sink) = geo.Open() {
                     let arc = |to: Vector2, r: f32, size| D2D1_ARC_SEGMENT {
                         point: to,
                         size: D2D_SIZE_F { width: r, height: r },
@@ -1220,7 +1217,6 @@ impl Ctx<'_> {
                         self.t().DrawGeometry(&geo, self.color(outline), 1.0 * s, &self.r.round);
                     }
                 }
-            }
         }
         let Some(c) = celsius else { return };
         let color = self.temp_color(c);
@@ -1238,8 +1234,8 @@ impl Ctx<'_> {
         unsafe {
             let ring = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: 11.3 * s, radiusY: 11.3 * s };
             self.t().DrawEllipse(&ring, self.color(self.fg.alpha(0.45)), 1.2 * s, None);
-            if let Ok(geo) = self.r.factory.CreatePathGeometry() {
-                if let Ok(sink) = geo.Open() {
+            if let Ok(geo) = self.r.factory.CreatePathGeometry()
+                && let Ok(sink) = geo.Open() {
                     // Neighbouring blades overlap near the hub; the default (alternate)
                     // fill would cut those overlaps out and leave dark notches there.
                     sink.SetFillMode(D2D1_FILL_MODE_WINDING);
@@ -1259,7 +1255,6 @@ impl Ctx<'_> {
                         self.t().FillGeometry(&geo, self.color(self.fg.alpha(0.92)), None);
                     }
                 }
-            }
             let hub = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: 3.1 * s, radiusY: 3.1 * s };
             self.t().FillEllipse(&hub, self.color(self.primary));
         }
@@ -1720,6 +1715,44 @@ fn decimal_separator() -> char {
     if n > 1 { char::from_u32(buf[0] as u32).unwrap_or('.') } else { '.' }
 }
 
+/// Renders the strip off-screen as a PNG data URL, for the settings window's preview.
+/// `scale` 2 keeps it crisp on high-DPI screens; the page draws it at half size.
+pub fn preview_png(modules: &[ModuleId], look: Look, store: &Store, light: bool, colors: (Rgba, Rgba), scale: f32) -> Option<String> {
+    use base64::Engine;
+    let devices: Vec<String> = peripherals::on_taskbar(&store.snapshot.peripherals).map(|p| p.short_name()).collect();
+    let (slots, width) = layout(modules, &devices, look, scale);
+    let frame = Frame {
+        slots,
+        width,
+        height: (48.0 * scale).round() as i32,
+        scale,
+        light,
+        hover: None,
+        active: None,
+        primary: colors.0,
+        secondary: colors.1,
+        look,
+    };
+    let mut r = Renderer::new().ok()?;
+    r.paint(&frame, store).ok()?;
+    let (px, w, h) = r.pixels()?;
+    // Premultiplied BGRA -> straight RGBA for PNG.
+    let mut rgba = Vec::with_capacity(px.len());
+    for p in px.chunks(4) {
+        let a = p[3] as f32 / 255.0;
+        let un = |c: u8| if a > 0.0 { ((c as f32 / a).round()).min(255.0) as u8 } else { 0 };
+        rgba.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), if p[3] <= 1 { 0 } else { p[3] }]);
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().ok()?.write_image_data(&rgba).ok()?;
+    }
+    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(out)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1926,42 +1959,4 @@ mod tests {
         assert_eq!(slots[1].x, slots[0].w + (ITEM_GAP * 1.75f32).round() as i32);
         assert_eq!(width, slots[1].x + slots[1].w);
     }
-}
-
-/// Renders the strip off-screen as a PNG data URL, for the settings window's preview.
-/// `scale` 2 keeps it crisp on high-DPI screens; the page draws it at half size.
-pub fn preview_png(modules: &[ModuleId], look: Look, store: &Store, light: bool, colors: (Rgba, Rgba), scale: f32) -> Option<String> {
-    use base64::Engine;
-    let devices: Vec<String> = peripherals::on_taskbar(&store.snapshot.peripherals).map(|p| p.short_name()).collect();
-    let (slots, width) = layout(modules, &devices, look, scale);
-    let frame = Frame {
-        slots,
-        width,
-        height: (48.0 * scale).round() as i32,
-        scale,
-        light,
-        hover: None,
-        active: None,
-        primary: colors.0,
-        secondary: colors.1,
-        look,
-    };
-    let mut r = Renderer::new().ok()?;
-    r.paint(&frame, store).ok()?;
-    let (px, w, h) = r.pixels()?;
-    // Premultiplied BGRA -> straight RGBA for PNG.
-    let mut rgba = Vec::with_capacity(px.len());
-    for p in px.chunks(4) {
-        let a = p[3] as f32 / 255.0;
-        let un = |c: u8| if a > 0.0 { ((c as f32 / a).round()).min(255.0) as u8 } else { 0 };
-        rgba.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), if p[3] <= 1 { 0 } else { p[3] }]);
-    }
-    let mut out = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut out, w, h);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().ok()?.write_image_data(&rgba).ok()?;
-    }
-    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(out)))
 }

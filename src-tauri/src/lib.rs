@@ -429,20 +429,16 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "settings" {
-                if let WindowEvent::Destroyed = event {
-                    if let Some(app) = window.app_handle().try_state::<Arc<App>>() {
+            if window.label() == "settings"
+                && let WindowEvent::Destroyed = event
+                    && let Some(app) = window.app_handle().try_state::<Arc<App>>() {
                         app.control.settings_open.store(false, Ordering::Relaxed);
                     }
-                }
-            }
-            if window.label() == "popup" {
-                if let WindowEvent::Focused(false) = event {
-                    if let Some(app) = window.app_handle().try_state::<Arc<App>>() {
+            if window.label() == "popup"
+                && let WindowEvent::Focused(false) = event
+                    && let Some(app) = window.app_handle().try_state::<Arc<App>>() {
                         app.popup.hide();
                     }
-                }
-            }
         })
         .build(tauri::generate_context!())
         .expect("error while building wStats")
