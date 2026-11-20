@@ -325,7 +325,7 @@ function generalPage() {
         ? [
             field(
               t.set.compactTag,
-              segmented<Settings["compactTag"]>([["icon", t.set.tagIcon], ["label", t.set.tagLabel]], settings.compactTag, (v) => update((s) => (s.compactTag = v))),
+              segmented<Settings["compactTag"]>([["icon", t.set.tagIcon], ["label", t.set.tagLabel], ["graphic", t.set.tagGraphic]], settings.compactTag, (v) => update((s) => (s.compactTag = v))),
             ),
             sideField(),
           ]
@@ -333,7 +333,14 @@ function generalPage() {
             field(
               t.set.label,
               segmented<Settings["label"]>(
-                [["top", t.set.labelTop], ["bottom", t.set.labelBottom], ["side", t.set.labelSide], ["none", t.set.labelNone]],
+                // "Inside" puts the number in the graphic, so it needs the graphics on.
+                [
+                  ["top", t.set.labelTop],
+                  ["bottom", t.set.labelBottom],
+                  ["side", t.set.labelSide],
+                  ["none", t.set.labelNone],
+                  ...(settings.graphics ? [["inside", t.set.labelInside] as [Settings["label"], string]] : []),
+                ],
                 settings.label,
                 (v) => update((s) => (s.label = v)),
               ),
@@ -343,7 +350,15 @@ function generalPage() {
             h(
               "div",
               "field",
-              h("div", "field row", h("div", "field-label", t.set.graphics), toggle(settings.graphics, (v) => update((s) => (s.graphics = v)), t.set.graphics)),
+              h("div", "field row", h("div", "field-label", t.set.graphics), toggle(
+                  settings.graphics,
+                  (v) =>
+                    update((s) => {
+                      s.graphics = v;
+                      if (!v && s.label === "inside") s.label = "bottom";
+                    }),
+                  t.set.graphics,
+                )),
               h("p", "field-hint", t.set.graphicsHint),
             ),
           ]),

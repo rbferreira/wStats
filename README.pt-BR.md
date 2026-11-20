@@ -23,13 +23,13 @@ O wStats coloca pequenos gráficos de **CPU, GPU, NPU, memória, disco, rede, ba
 
 A diferença para outros monitores é que **o wStats faz parte da barra**: ele não flutua por cima dela. Os ícones de apps abrem espaço para ele como fazem com o botão de Widgets, e tudo se reorganiza quando você liga ou desliga um item.
 
-E ele fica do seu jeito: **o nome de cada item vai em cima, embaixo, ao lado (à esquerda ou à direita) ou some**, e sem nome ao lado o número cresce para ocupar a altura da barra. Os gráficos também podem ser desligados, deixando só o texto.
+E ele fica do seu jeito: **o nome de cada item vai em cima, embaixo, ao lado (à esquerda ou à direita) ou some**, e sem nome ao lado o número cresce para ocupar a altura da barra. Os gráficos também podem ser desligados, deixando só o texto. O visual mais estreito põe **o número dentro do gráfico**: nos anéis de memória e disco, sobre o histórico de CPU, GPU e rede, com o nome embaixo.
 
 <div align="center">
 <img src="docs/img/pt-BR/labels.png" alt="Os quatro jeitos de mostrar a legenda: em cima, embaixo, ao lado e sem legenda" width="100%">
 </div>
 
-Para quem quer a barra livre, o **modo compacto** põe dois itens por coluna, só com os números, cada um identificado por um ícone ou pelo nome, à esquerda ou à direita. Os dez itens cabem em menos da metade do espaço, e cada número continua abrindo o seu painel.
+Para quem quer a barra livre, o **modo compacto** põe dois itens por coluna, só com os números, cada um identificado por um ícone, pelo nome ou por um gráfico pequeno ao vivo, à esquerda ou à direita. Os dez itens cabem em menos da metade do espaço, e cada número continua abrindo o seu painel.
 
 <div align="center">
 <img src="docs/img/pt-BR/compact.png" alt="O modo compacto nas quatro combinações: ícone ou legenda, à esquerda ou à direita" width="60%">
@@ -63,8 +63,8 @@ E também:
 - **Tema claro e escuro**, seguindo o Windows ou fixo, com as duas cores dos gráficos configuráveis.
 - **Histórico de 24 horas** com médias por minuto, guardado entre reinicializações (Agora / 1 h / 24 h em cada gráfico).
 - **Posição** junto ao widget (entre o clima e o Iniciar) ou junto à bandeja, num monitor escolhido ou em todos.
-- **Legenda do seu jeito**: em cima, embaixo, ao lado ou sem, com prévia ao vivo nas Configurações. Os gráficos também podem ser desligados, deixando só o texto.
-- **Modo compacto**: dois itens por coluna, só com os números, identificados por ícone ou legenda, à esquerda ou à direita. Ocupa menos da metade do espaço.
+- **Legenda do seu jeito**: em cima, embaixo, ao lado, sem, ou o número dentro do gráfico, com prévia ao vivo nas Configurações. Os gráficos também podem ser desligados, deixando só o texto.
+- **Modo compacto**: dois itens por coluna, só com os números, identificados por ícone, legenda ou gráfico pequeno, à esquerda ou à direita. Ocupa menos da metade do espaço.
 - **Ordem dos itens** ajustável arrastando nas Configurações.
 - **Português e inglês**, seguindo o idioma do Windows ou escolhido nas Configurações; o instalador também é bilíngue.
 - **Economizar memória**: descarrega os painéis depois de 1 minuto sem uso, e o wStats cai para cerca de 18 MB (com os painéis sempre prontos, fica em torno de 110 MB, quase tudo do WebView2).
