@@ -52,6 +52,9 @@ const SAVE_EVERY: Duration = Duration::from_secs(300);
 pub struct Control {
     /// Set while a popup is visible: enables the per-process scan.
     pub detailed: AtomicBool,
+    /// Set while the network popup is visible: enables reading the Wi-Fi connection,
+    /// which Windows counts as using the location (see `NetCollector::sample`).
+    pub wifi: AtomicBool,
     pub interval_ms: AtomicU32,
     /// Set while the settings window is open: its live previews show processes too.
     pub settings_open: AtomicBool,
@@ -110,7 +113,7 @@ fn run(store: Shared, control: Arc<Control>, devices: Arc<RwLock<peripherals::Pe
 
     // Rate counters need two collections before they report anything.
     q.collect();
-    net.sample();
+    net.sample(false);
 
     let mut next = Instant::now();
     let mut saved = Instant::now();
@@ -132,7 +135,7 @@ fn run(store: Shared, control: Arc<Control>, devices: Arc<RwLock<peripherals::Pe
             cpu: cpu.sample(&q),
             mem: mem.sample(&q),
             net: {
-                let mut n = net.sample();
+                let mut n = net.sample(control.wifi.load(Ordering::Relaxed));
                 if let Some(p) = &control.pinger {
                     n.ping_ms = p.last();
                     n.ping_host = p.host.read().clone();
@@ -266,7 +269,7 @@ mod tests {
         println!("top mem {:?}", p.by_mem.iter().map(|r| (&r.name, r.count, r.mem >> 20)).collect::<Vec<_>>());
         println!("system {:?}", { let s = system_info(); (s.hostname, s.os) });
         let mut n = net::NetCollector::new();
-        n.sample();
-        for i in n.sample().interfaces { println!("net {} [{}] {:?} gw={:?} wifi={:?}", i.name, i.kind, i.ipv4, i.gateway, i.wifi.map(|w| (w.ssid, w.signal, w.phy, w.channel))); }
+        n.sample(true);
+        for i in n.sample(true).interfaces { println!("net {} [{}] {:?} gw={:?} wifi={:?}", i.name, i.kind, i.ipv4, i.gateway, i.wifi.map(|w| (w.ssid, w.signal, w.phy, w.channel))); }
     }
 }

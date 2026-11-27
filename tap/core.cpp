@@ -23,6 +23,7 @@
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Core.h>
@@ -35,6 +36,7 @@
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Windows.UI.Xaml.Media.Imaging.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -116,6 +118,12 @@ struct Slot
     FrameworkElement start{nullptr}; // the Start button, whose margin moves the icons; see Push
     Thickness widgetsMargin{}, repeaterMargin{}, startMargin{};
     double push = 0; // DIPs the icons are moved right (negative: left) by start's margin
+    double startWidth = 45; // the Start button's width, from when it was not pulled left
+    bool crowded = false;   // the icons do not fit beside the strip; see Crowded
+    double iconWidth = 0;   // ... each icon's width when that was found
+    ULONGLONG overSince = 0;
+    int branch = -1;        // which case of Layout ran last
+    bool narrowed = false;  // strip on the right: the repeater ends at the strip
     DispatcherTimer timer{nullptr};
     DispatcherTimer::Tick_revoker tick;
     FrameworkElement::PointerMoved_revoker moved;
@@ -301,6 +309,7 @@ void Teardown(Slot& f)
     if (f.start) f.start.Margin(f.startMargin);
     f.start = nullptr;
     f.push = 0;
+    f.crowded = f.narrowed = false;
     if (f.root && f.host)
     {
         uint32_t index;
@@ -451,26 +460,97 @@ void Push(Slot& f, double want)
     f.push = want;
 }
 
-/// Where the icon group would sit without our push, in the root's coordinates: from
-/// layout positions, less the push already applied, so this does not feed back on itself.
-bool IconExtent(Slot& f, double& first, double& last)
+/// The icon group as Explorer lays it out, in the root's coordinates.
+struct Icons
 {
-    first = 1e9, last = -1e9;
+    double first = 1e9, last = -1e9;
+    int count = 0;
+    double widest = 0; // the widest button: one icon's room, which the group's span is not mid-animation
+    bool overflow = false; // the overflow ("...") button is showing: some icons are hidden in it
+};
+
+/// Measures the icon group from layout offsets, which leave out the slide animations
+/// (positions taken through transforms swing while the icons move).
+bool IconExtent(Slot& f, Icons& g)
+{
+    g = {};
     double width = f.repeater.ActualWidth();
+    double origin = f.repeater.TransformToVisual(f.root).TransformPoint({0, 0}).X;
     for (int i = 0, n = VisualTreeHelper::GetChildrenCount(f.repeater); i < n; i++)
     {
         auto child = VisualTreeHelper::GetChild(f.repeater, i).try_as<FrameworkElement>();
         if (!child || child == f.widgets || child.ActualWidth() <= 0 || child.Visibility() != Visibility::Visible) continue;
-        double x = child.TransformToVisual(f.repeater).TransformPoint({0, 0}).X;
+        double x = child.ActualOffset().x;
+        if (child == f.start)
+        {
+            // Pulled left by a negative margin, Start reports a made-up offset and width
+            // (-72 and 193 DIP, measured): it is counted below from its own width, just
+            // before the next button, as it is drawn.
+            if (f.push >= 0) f.startWidth = child.ActualWidth();
+            continue;
+        }
         if (x + child.ActualWidth() <= 0 || x >= width) continue; // recycled, parked out of view
-        double rx = child.TransformToVisual(f.root).TransformPoint({0, 0}).X;
-        first = std::min(first, rx);
-        last = std::max(last, rx + child.ActualWidth());
+        if (get_class_name(child) == L"Taskbar.OverflowToggleButton") g.overflow = true;
+        g.first = std::min(g.first, origin + x);
+        g.last = std::max(g.last, origin + x + child.ActualWidth());
+        g.count++;
+        g.widest = std::max(g.widest, child.ActualWidth());
     }
-    if (last < first) return false;
-    first -= f.push;
-    last -= f.push;
-    return true;
+    if (f.start && g.count > 0)
+    {
+        g.first -= f.startWidth;
+        g.count++;
+        g.widest = std::max(g.widest, f.startWidth);
+    }
+    return g.count > 0;
+}
+
+/// What the taskbar keeps free before the notification area: the overflow ("...")
+/// button's width, kept even while the button is hidden, and a few DIPs (measured 3.5).
+double OverflowReserve(Slot& f)
+{
+    for (int i = 0, n = VisualTreeHelper::GetChildrenCount(f.repeater); i < n; i++)
+    {
+        auto child = VisualTreeHelper::GetChild(f.repeater, i).try_as<FrameworkElement>();
+        if (child && get_class_name(child) == L"Taskbar.OverflowToggleButton") return child.ActualWidth() + 4;
+    }
+    return 4;
+}
+
+/// Whether centred icons no longer fit between a left strip and the notification area.
+///
+/// The push is a margin on the Start button, and Windows judges whether the bar is full
+/// by the whole group, margin included. Worked out from the icons' own width, the margin
+/// made a crowded bar shrink its icons ("smaller taskbar buttons when full"), the smaller
+/// icons asked for less margin, the bar was no longer full, the icons grew back, and so
+/// on ten times a second. So a crowded bar gets a margin that does not depend on the
+/// icons at all, and crowded is a state with room to spare before it is left: icons
+/// shrunk by Windows would otherwise look like room again.
+bool Crowded(Slot& f, Icons const& g, double room)
+{
+    double span = g.last - g.first;
+    if (!f.crowded)
+    {
+        if (span <= room + 0.5)
+        {
+            f.overSince = 0;
+            return false;
+        }
+        ULONGLONG now = GetTickCount64();
+        if (!f.overSince) f.overSince = now;
+        if (now - f.overSince < 500) return false;
+        f.crowded = true;
+        f.iconWidth = g.widest;
+        wstats::Trace(L"core: frame %llu: %d icons need %.0f DIP, %.0f free; letting the taskbar fit them",
+                      static_cast<unsigned long long>(f.handle), g.count, span, room);
+    }
+    else if ((g.count + 1) * f.iconWidth <= room)
+    {
+        f.crowded = false;
+        f.overSince = 0;
+        wstats::Trace(L"core: frame %llu: room for the icons again", static_cast<unsigned long long>(f.handle));
+    }
+    return f.crowded;
 }
 
 void Layout(Slot& f)
@@ -493,8 +573,16 @@ void Layout(Slot& f)
 
     bool left = g_shared.header->position == wstats::Left;
     bool widgetsShown = WidgetsShown(f);
-    double first = 0, last = 0;
-    bool icons = IconExtent(f, first, last);
+    Icons g;
+    bool icons = IconExtent(f, g);
+    int branch = left ? (widgetsShown ? 0 : 1) : 2;
+    if (branch != f.branch)
+    {
+        // What one case worked out means nothing to another.
+        f.branch = branch;
+        f.crowded = f.narrowed = false;
+        f.overSince = 0;
+    }
     if (left && widgetsShown)
     {
         // The Widgets button is wider than what it draws (it keeps ~58 DIP of slack on
@@ -522,7 +610,26 @@ void Layout(Slot& f)
         double x = f.repeaterMargin.Left + kGap;
         f.host.HorizontalAlignment(HorizontalAlignment::Left);
         SetMargin(f.host, {x, 0, 0, 0});
-        Push(f, icons && w > 0 ? std::max(0.0, x + w + kGap - first) : 0.0);
+        double target = x + w + kGap; // where the icons may start
+        double want = 0;
+        if (icons && w > 0 && Centered())
+        {
+            // Where the group would sit unpushed: centred on the repeater, which holds
+            // even while a pushed group is pressed against the notification area.
+            double from = f.repeater.TransformToVisual(f.root).TransformPoint({0, 0}).X;
+            double mid = from + f.repeater.ActualWidth() / 2;
+            double room = f.root.ActualWidth() - TrayInset(f) - OverflowReserve(f) - target;
+            if (Crowded(f, g, room))
+                want = (target - from) / 2; // a margin of exactly the strip's room (Push doubles it)
+            else
+                want = std::max(0.0, target - (mid - (g.last - g.first) / 2));
+        }
+        else if (icons && w > 0)
+        {
+            // Left-aligned icons move by the whole margin, whatever their size.
+            want = std::max(0.0, target - (g.first - f.push));
+        }
+        Push(f, want);
     }
     else
     {
@@ -530,22 +637,32 @@ void Layout(Slot& f)
         double tray = TrayInset(f);
         f.host.HorizontalAlignment(HorizontalAlignment::Right);
         SetMargin(f.host, {0, 0, tray + kGap, 0});
-        if (Centered())
-        {
-            // As on the left: the repeater's right margin would leave centred icons
-            // off-centre, so they move left only when they would reach the strip.
-            SetMargin(f.repeater, f.repeaterMargin);
-            double edge = f.root.ActualWidth() - tray - reserve;
-            Push(f, icons && w > 0 ? -std::max(0.0, last - edge) : 0.0);
-        }
-        else
-        {
-            // Left-aligned icons do not move when the repeater narrows; the margin only
-            // makes the taskbar send icons to its overflow menu before they reach us.
-            // A right margin keeps the repeater's origin, so menus stay put.
-            SetMargin(f.repeater, {f.repeaterMargin.Left, f.repeaterMargin.Top, f.repeaterMargin.Right + tray + reserve, f.repeaterMargin.Bottom});
-            Push(f, 0);
-        }
+        double edge = f.root.ActualWidth() - tray - reserve; // where the icons must end
+        double from = f.repeater.TransformToVisual(f.root).TransformPoint({0, 0}).X;
+        // The middle of the repeater as it is without our right margin, or narrowing it
+        // would move the middle and undo the decision below.
+        double natural = f.repeater.ActualWidth() + f.repeater.Margin().Right - f.repeaterMargin.Right;
+        double mid = from + natural / 2;
+        double span = g.last - g.first;
+        // Centred icons that would reach the strip leave the middle of the bar. Not by
+        // a negative margin on Start (what this did before): Start's slot gives up at
+        // most its own width, about 45 DIP, and beyond that the icons stayed under the
+        // strip. The repeater ends short of the strip instead, and the taskbar centres
+        // the icons in what is left. One icon of slack before going back, and never
+        // while crowded: icons the taskbar shrank would look like room again.
+        bool crowded = Centered() && icons && w > 0 && Crowded(f, g, edge - from - OverflowReserve(f));
+        if (!Centered()) f.narrowed = true;
+        else if (!f.narrowed && icons && w > 0 && mid + span / 2 > edge) f.narrowed = true;
+        else if (f.narrowed && !crowded && (!icons || w <= 0 || mid + span / 2 < edge - g.widest)) f.narrowed = false;
+        // The repeater stops short of the strip by the strip's width. Only by that: the
+        // taskbar already keeps the notification area's width free at the end of the
+        // repeater, which spans the whole bar; taking the tray off as well sent five of
+        // thirteen icons to the overflow menu with room to spare. A right margin keeps
+        // the repeater's origin, so menus stay put, and the taskbar shrinks the icons or
+        // uses its overflow menu by itself when they do not fit.
+        SetMargin(f.repeater, f.narrowed ? Thickness{f.repeaterMargin.Left, f.repeaterMargin.Top, f.repeaterMargin.Right + reserve, f.repeaterMargin.Bottom}
+                                         : f.repeaterMargin);
+        Push(f, 0);
     }
 }
 
