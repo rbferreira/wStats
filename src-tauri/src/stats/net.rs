@@ -36,6 +36,7 @@ pub struct NetCollector {
     details: HashMap<u64, Details>,
     wifi: HashMap<GUID, Wifi>,
     details_at: Option<Instant>,
+    wifi_at: Option<Instant>,
     wlan: Option<HANDLE>,
 }
 
@@ -57,17 +58,29 @@ impl NetCollector {
             details: HashMap::new(),
             wifi: HashMap::new(),
             details_at: None,
+            wifi_at: None,
             wlan: open_wlan(),
         }
     }
 
-    pub fn sample(&mut self) -> Net {
+    /// `wifi`: whether to read the Wi-Fi connection (network name, signal). Windows
+    /// counts reading the network name as using the location, and shows its location icon
+    /// in the notification area for as long as that goes on; the icon coming and going
+    /// also moves the taskbar's icons. Only the popup shows these, so only a visible popup
+    /// asks for them.
+    pub fn sample(&mut self, wifi: bool) -> Net {
         let now = Instant::now();
         let secs = self.prev_at.map(|t| (now - t).as_secs_f64()).unwrap_or(0.0);
         self.prev_at = Some(now);
 
         if self.details_at.is_none_or(|t| t.elapsed() >= DETAILS_REFRESH) {
             self.details = adapter_details();
+            self.details_at = Some(now);
+        }
+        if !wifi {
+            // The last reading stays for the popup's first frame; opening it reads at once.
+            self.wifi_at = None;
+        } else if self.wifi_at.is_none_or(|t| t.elapsed() >= DETAILS_REFRESH) {
             // The WLAN service may start after wStats, or restart: a handle that is
             // missing or no longer answers is opened again for the next round.
             self.wifi = match self.wlan.and_then(wifi_details) {
@@ -80,7 +93,7 @@ impl NetCollector {
                     HashMap::new()
                 }
             };
-            self.details_at = Some(now);
+            self.wifi_at = Some(now);
         }
 
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
@@ -317,8 +330,8 @@ mod tests {
     #[test]
     fn live_table_reads() {
         let mut c = NetCollector::new();
-        c.sample();
-        let n = c.sample();
+        c.sample(false);
+        let n = c.sample(false);
         assert!(n.up >= 0.0 && n.down >= 0.0);
     }
 }

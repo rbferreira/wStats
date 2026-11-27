@@ -182,6 +182,7 @@ impl Popup {
         *self.strip.active.lock() = Some(module);
         self.strip.refresh();
         self.control.detailed.store(true, Ordering::Relaxed);
+        self.control.wifi.store(module == ModuleId::Net, Ordering::Relaxed);
         // Unloaded to save memory: rebuild it. The new page asks for the pending module
         // and reports its size once it is rendered; showing before that is an empty box.
         if self.window().is_none() {
@@ -252,6 +253,7 @@ impl Popup {
         }
         *self.strip.active.lock() = None;
         self.control.detailed.store(false, Ordering::Relaxed);
+        self.control.wifi.store(false, Ordering::Relaxed);
         self.strip.refresh();
     }
 }
